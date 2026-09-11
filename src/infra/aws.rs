@@ -10,7 +10,6 @@ use aws_credential_types::provider::future::ProvideCredentials as ProvideCredent
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::config::SharedHttpClient;
 use aws_sdk_s3::config::{Credentials, ProvideCredentials};
-use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::{config::Region, Client, Config as S3Config};
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
@@ -221,49 +220,43 @@ impl StorageProvider for S3Storage {
         path: &std::path::Path,
         length: u64,
     ) -> Result<(), StorageError> {
-        use aws_sdk_s3::{
-            config::retry::RetryConfig,
-            primitives::{ByteStream, Length},
-        };
-        for attempt in 0..3 {
-            let body = ByteStream::read_from()
-                .path(path)
-                .length(Length::Exact(length))
-                .build()
-                .await
-                .map_err(|_| StorageError::OperationFailed)?;
-            let result = self
-                .client
-                .put_object()
-                .bucket(&self.bucket_name)
-                .key(hash)
-                .if_none_match("*")
-                .content_length(length as i64)
-                .body(body)
-                .customize()
-                .config_override(S3Config::builder().retry_config(RetryConfig::disabled()))
-                .send()
-                .instrument(tracing::info_span!(
-                    "s3.request",
-                    otel.kind = "client",
-                    rpc.system = "aws-api",
-                    rpc.service = "S3",
-                    rpc.method = "PutObject"
-                ))
-                .await;
-            let Err(error) = result else { return Ok(()) };
-            match put_failure(
-                error
+        use aws_sdk_s3::primitives::{ByteStream, Length};
+
+        let body = ByteStream::read_from()
+            .path(path)
+            .length(Length::Exact(length))
+            .build()
+            .await
+            .map_err(|_| StorageError::OperationFailed)?;
+        self.client
+            .put_object()
+            .bucket(&self.bucket_name)
+            .key(hash)
+            .if_none_match("*")
+            .content_length(length as i64)
+            .body(body)
+            .send()
+            .instrument(tracing::info_span!(
+                "s3.request",
+                otel.kind = "client",
+                rpc.system = "aws-api",
+                rpc.service = "S3",
+                rpc.method = "PutObject"
+            ))
+            .await
+            .map_err(|error| {
+                if error
                     .raw_response()
-                    .map(|response| response.status().as_u16()),
-                error.as_service_error().and_then(|error| error.code()),
-            ) {
-                PutFailure::Exists => return Err(StorageError::AlreadyExists),
-                PutFailure::Retry if attempt < 2 => continue,
-                _ => return Err(StorageError::OperationFailed),
-            }
-        }
-        Err(StorageError::OperationFailed)
+                    .is_some_and(|response| response.status().as_u16() == 412)
+                {
+                    StorageError::AlreadyExists
+                } else {
+                    tracing::error!("S3 put_object failed: {:?}", error);
+                    StorageError::OperationFailed
+                }
+            })?;
+
+        Ok(())
     }
 
     async fn retrieve(
@@ -294,41 +287,5 @@ impl StorageProvider for S3Storage {
 
         // Direct streaming - no buffering
         Ok(Box::new(result.body.into_async_read()))
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum PutFailure {
-    Exists,
-    Retry,
-    Failed,
-}
-
-fn put_failure(status: Option<u16>, code: Option<&str>) -> PutFailure {
-    match (status, code) {
-        (Some(412), Some("PreconditionFailed")) => PutFailure::Exists,
-        (Some(409), Some("ConditionalRequestConflict")) => PutFailure::Retry,
-        _ => PutFailure::Failed,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_conditional_conflicts_are_special() {
-        assert_eq!(
-            put_failure(Some(412), Some("PreconditionFailed")),
-            PutFailure::Exists
-        );
-        assert_eq!(
-            put_failure(Some(409), Some("ConditionalRequestConflict")),
-            PutFailure::Retry
-        );
-        assert_eq!(
-            put_failure(Some(409), Some("AccessDenied")),
-            PutFailure::Failed
-        );
     }
 }
