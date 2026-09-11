@@ -15,7 +15,7 @@ pub async fn store_artifact<T: StorageProvider>(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     validation::validate_hash(&hash)?;
-    let spool = tempfile::NamedTempFile::new().map_err(|_| ServerError::InternalError)?;
+    let spool = tempfile::NamedTempFile::new()?;
     let (file, path) = spool.into_parts();
     let mut file = tokio::fs::File::from_std(file);
     let mut body = body.into_data_stream();
@@ -28,11 +28,9 @@ pub async fn store_artifact<T: StorageProvider>(
         if length > state.config.max_upload_bytes {
             return Err(ServerError::TooLarge);
         }
-        file.write_all(&chunk)
-            .await
-            .map_err(|_| ServerError::InternalError)?;
+        file.write_all(&chunk).await?;
     }
-    file.flush().await.map_err(|_| ServerError::InternalError)?;
+    file.flush().await?;
     state.storage.store(&hash, &path, length).await?;
 
     Ok((StatusCode::OK, ""))

@@ -16,6 +16,9 @@ pub enum ServerError {
     #[error("Artifact too large")]
     TooLarge,
 
+    #[error("Upload spool I/O failed: {0}")]
+    UploadIo(#[from] std::io::Error),
+
     #[error("Internal server error")]
     InternalError,
 

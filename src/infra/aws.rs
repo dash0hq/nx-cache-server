@@ -227,7 +227,10 @@ impl StorageProvider for S3Storage {
             .length(Length::Exact(length))
             .build()
             .await
-            .map_err(|_| StorageError::OperationFailed)?;
+            .map_err(|error| {
+                tracing::error!("S3 upload body failed: {:?}", error);
+                StorageError::OperationFailed
+            })?;
         self.client
             .put_object()
             .bucket(&self.bucket_name)

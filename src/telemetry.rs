@@ -1,6 +1,6 @@
 use opentelemetry::{global, trace::TracerProvider as _};
 use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::SdkTracerProvider};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct Telemetry(Option<SdkTracerProvider>);
 
@@ -28,6 +28,7 @@ impl Telemetry {
             tracing_opentelemetry::layer().with_tracer(provider.tracer("nx-cache-server"))
         });
         tracing_subscriber::registry()
+            .with(LevelFilter::INFO)
             .with(tracing_subscriber::fmt::layer())
             .with(layer)
             .init();
