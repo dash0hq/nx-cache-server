@@ -61,16 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Export only to explicitly configured OTLP endpoints. Never print exporter configuration.
+    let telemetry = nx_cache_server::telemetry::Telemetry::init()?;
     // Run server
     tracing::info!(
         "Server starting on {}",
         std::net::SocketAddr::new(cli.server.bind_address, cli.server.port)
     );
-    if let Err(e) = run_server(storage, &cli.server).await {
-        eprintln!();
-        eprintln!("Server error: {}", e);
-        std::process::exit(1);
-    }
-
+    let result = run_server(storage, &cli.server).await;
+    tokio::task::spawn_blocking(move || telemetry.shutdown()).await?;
+    result?;
     Ok(())
 }

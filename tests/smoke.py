@@ -67,7 +67,7 @@ class Fixture:
         port = free_port()
         spool = self.directory / f"spool-{port}"
         log = open(self.directory / f"server-{port}.log", "w+")
-        env = {key: value for key, value in os.environ.items() if not key.startswith(("AWS_", "S3_"))}
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("AWS_", "S3_", "OTEL_"))}
         env.update(AWS_REGION="us-east-1", AWS_ACCESS_KEY_ID="local-cache",
                    AWS_SECRET_ACCESS_KEY="local-cache-password", AWS_EC2_METADATA_DISABLED="true",
                    S3_ENDPOINT_URL=self.endpoint, S3_BUCKET_NAME="nx-cache", S3_PREFIX=self.prefix,

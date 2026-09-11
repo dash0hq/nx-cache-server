@@ -36,6 +36,11 @@ pub async fn store_artifact<T: StorageProvider>(
     let received = super::uploads::receive(body, &state.config, Some(&mut file)).await;
     drop(file);
     let bytes = received.as_ref().ok().copied();
+    if let Some(bytes) = bytes {
+        crate::telemetry::instruments()
+            .spool_size
+            .record(bytes, &[]);
+    }
     tracing::info!(event = "spool", added_bytes = bytes);
     let result = async {
         let bytes = received?;
@@ -47,6 +52,7 @@ pub async fn store_artifact<T: StorageProvider>(
     }
     .await;
     path.close().map_err(|_| {
+        crate::telemetry::instruments().cleanup_errors.add(1, &[]);
         tracing::error!(event = "spool", cleanup_error = true);
         ServerError::InternalError
     })?;

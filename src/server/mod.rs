@@ -51,7 +51,7 @@ pub async fn run_server<T: StorageProvider + Clone>(
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!("Server running on {}", addr);
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             #[cfg(unix)]
             {
@@ -63,14 +63,14 @@ pub async fn run_server<T: StorageProvider + Clone>(
             #[cfg(not(unix))]
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await?;
+        .await;
     // Detached upload tasks retain permits through persistence and cleanup.
     let _all = uploads
         .permits
         .acquire_many(config.max_uploads as u32)
         .await;
 
-    Ok(())
+    result
 }
 
 #[cfg(test)]

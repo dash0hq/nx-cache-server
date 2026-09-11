@@ -117,6 +117,56 @@ metrics; there is no metrics server. Byte fields are object sizes, not confirmed
 client delivery. Inbound partial spools are bounded by active count × upload limit.
 No token, hash, artifact content, or SDK request detail is logged.
 
+### OpenTelemetry and Dash0
+
+The server exports traces and metrics over OTLP HTTP/protobuf with TLS support.
+Export is off unless an endpoint is explicitly configured. Use a local collector
+or copy your organization's **OTLP HTTP endpoint** from Dash0's endpoint settings:
+
+```sh
+export OTEL_SERVICE_NAME=nx-cache-server
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://your-dash0-otlp-http-endpoint:4318"
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20${DASH0_AUTH_TOKEN}"
+export OTEL_RESOURCE_ATTRIBUTES="deployment.environment.name=production"
+```
+
+Inject the token from your secret manager; do not put it in the repository or
+command-line arguments. Pass these variables into the container when using Docker.
+No Dash0 credentials or production endpoint are needed by any test.
+
+The SDK appends `/v1/traces` and `/v1/metrics` to the base endpoint. Signal-specific
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+override it and must include the full path; configuring only one enables only that
+signal. Standard OTLP headers and timeout variables, `OTEL_SERVICE_NAME`,
+`OTEL_RESOURCE_ATTRIBUTES`, and `OTEL_TRACES_SAMPLER` are supported. Only
+`http/protobuf` is supported, not gRPC. `OTEL_SDK_DISABLED=true` disables export.
+Malformed endpoints fail startup without printing their contents. Collector outages
+do not fail cache requests; the SDK batches in bounded queues and may drop telemetry.
+SIGTERM/SIGINT drains uploads before best-effort exporter flushing. Each provider
+has a separate five-second shutdown deadline in this SDK version; increasing the
+OTLP request timeout does not extend it. Allow ten additional seconds of termination
+grace for both signals. A slow or unavailable collector can lose the final batch.
+
+Server spans cover `/v1/cache/{hash}`, including auth rejection, and preserve W3C
+`traceparent`/`tracestate` across detached uploads. S3 spans are their children.
+No baggage, raw URLs, object keys, tokens or artifact contents are captured.
+The public liveness endpoint and unmatched routes are deliberately not traced.
+Existing stdout logs remain separate; this integration exports no OTLP logs.
+
+| Metric | Meaning |
+| --- | --- |
+| `http.server.request.duration` | Seconds until the response is constructed, by method/template/status; excludes streaming body delivery |
+| `nx.cache.s3.duration` | Seconds per PUT attempt or GET SDK call including SDK retries, by operation/error |
+| `nx.cache.lookups` | GET count by `hit`, `miss`, or `error` |
+| `nx.cache.uploads.active` | Admitted writes and RO drains, decremented after cleanup |
+| `nx.cache.spool.size` | Completed inbound spool sizes in bytes, not current disk occupancy |
+| `nx.cache.artifact.size` | Successful stored/retrieved object sizes, not bytes delivered to the caller |
+| `nx.cache.spool.cleanup.errors` | Failed spool removals |
+
+`make check` includes a local protobuf receiver test of the real binary: propagation,
+Dash0-style auth headers, resources, metric values, privacy and shutdown flushing.
+
 ```sh
 docker build -t nx-cache-local .
 docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \

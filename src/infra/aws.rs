@@ -1,3 +1,4 @@
+use crate::telemetry;
 use async_trait::async_trait;
 use aws_config::default_provider::credentials::DefaultCredentialsChain;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -16,6 +17,10 @@ use aws_sdk_s3::{config::Region, Client, Config as S3Config};
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};
 use clap::Parser;
+use opentelemetry::{
+    trace::{FutureExt, SpanKind, Status, TraceContextExt},
+    Context, KeyValue,
+};
 use tokio::io::AsyncRead;
 
 use crate::domain::{
@@ -250,6 +255,16 @@ impl StorageProvider for S3Storage {
                 .build()
                 .await
                 .map_err(|_| StorageError::OperationFailed)?;
+            let span = telemetry::Span::new(
+                "S3 PutObject",
+                SpanKind::Client,
+                &Context::current(),
+                vec![
+                    KeyValue::new("rpc.system", "aws-api"),
+                    KeyValue::new("rpc.service", "S3"),
+                    KeyValue::new("rpc.method", "PutObject"),
+                ],
+            );
             let start = std::time::Instant::now();
             let result = self
                 .client
@@ -262,7 +277,19 @@ impl StorageProvider for S3Storage {
                 .customize()
                 .config_override(S3Config::builder().retry_config(RetryConfig::disabled()))
                 .send()
+                .with_context(span.0.clone())
                 .await;
+            telemetry::instruments().s3.record(
+                start.elapsed().as_secs_f64(),
+                &[
+                    KeyValue::new("operation", "put"),
+                    KeyValue::new("error", result.is_err()),
+                ],
+            );
+            if result.is_err() {
+                span.0.span().set_status(Status::error("S3 PUT failed"));
+            }
+            drop(span);
             tracing::info!(
                 event = "s3",
                 operation = "put",
@@ -271,6 +298,9 @@ impl StorageProvider for S3Storage {
                 bytes = length
             );
             let Err(error) = result else {
+                telemetry::instruments()
+                    .artifacts
+                    .record(length, &[KeyValue::new("operation", "put")]);
                 return Ok(());
             };
             let status = error.raw_response().map(|r| r.status().as_u16());
@@ -289,6 +319,16 @@ impl StorageProvider for S3Storage {
         &self,
         hash: &str,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, StorageError> {
+        let span = telemetry::Span::new(
+            "S3 GetObject",
+            SpanKind::Client,
+            &Context::current(),
+            vec![
+                KeyValue::new("rpc.system", "aws-api"),
+                KeyValue::new("rpc.service", "S3"),
+                KeyValue::new("rpc.method", "GetObject"),
+            ],
+        );
         let start = std::time::Instant::now();
         let result = self
             .client
@@ -296,6 +336,7 @@ impl StorageProvider for S3Storage {
             .bucket(&self.bucket_name)
             .key(format!("{}/{}", self.prefix, hash))
             .send()
+            .with_context(span.0.clone())
             .await
             .map_err(|e| match e.into_service_error() {
                 GetObjectError::NoSuchKey(_) => StorageError::NotFound,
@@ -303,7 +344,34 @@ impl StorageProvider for S3Storage {
                     tracing::error!(event = "s3", operation = "get", error = true);
                     StorageError::OperationFailed
                 }
-            })?;
+            });
+        let outcome = match &result {
+            Ok(_) => "hit",
+            Err(StorageError::NotFound) => "miss",
+            Err(_) => "error",
+        };
+        telemetry::instruments()
+            .lookups
+            .add(1, &[KeyValue::new("outcome", outcome)]);
+        telemetry::instruments().s3.record(
+            start.elapsed().as_secs_f64(),
+            &[
+                KeyValue::new("operation", "get"),
+                KeyValue::new("error", outcome == "error"),
+            ],
+        );
+        if outcome == "error" {
+            span.0.span().set_status(Status::error("S3 GET failed"));
+        }
+        span.0
+            .span()
+            .set_attribute(KeyValue::new("nx.cache.outcome", outcome));
+        let result = result?;
+        if let Some(bytes) = result.content_length().and_then(|n| u64::try_from(n).ok()) {
+            telemetry::instruments()
+                .artifacts
+                .record(bytes, &[KeyValue::new("operation", "get")]);
+        }
         tracing::info!(
             event = "s3",
             operation = "get",
