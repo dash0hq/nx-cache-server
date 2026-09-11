@@ -1488,8 +1488,6 @@ dependencies = [
  "opentelemetry_sdk",
  "reqwest",
  "rustls",
- "serde",
- "serde_json",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",

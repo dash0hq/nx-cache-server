@@ -21,15 +21,15 @@ Access to AWS S3 (or S3-compatible service like MinIO)
 ### Installation
 
 #### Step 1: Pull the image
+
 ```bash
 docker pull ghcr.io/dash0hq/nx-cache-server:latest
 ```
 
 #### Step 2: Configure the server
 
-The server supports configuration via environment variables, command-line arguments, or both.
+Configure the server with environment variables:
 
-##### Option A: Environment Variables (Recommended)
 ```bash
 # Required
 export S3_BUCKET_NAME="your-s3-bucket-name"
@@ -54,36 +54,10 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="https://your-dash0-otlp-http-endpoint:4318"
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20your-token"
 ```
 
-##### Option B: Command Line Arguments
-```bash
-./nx-cache-aws \
-  --region "your-aws-region" \
-  --access-key-id "your-aws-access-key-id" \
-  --secret-access-key "your-aws-secret-access-key" \
-  --bucket-name "your-s3-bucket-name" \
-  --session-token "your-session-token" \
-  --endpoint-url "your-s3-endpoint-url" \
-  --service-access-token "your-bearer-token" \
-  --timeout-seconds 30 \
-  --port 3000 \
-  --bind-address 0.0.0.0
-```
-
-##### Option C: Mixed Configuration
-You can also combine both methods. Command line arguments will override environment variables:
-```bash
-# Set common config via environment
-export AWS_REGION="us-west-2"
-export S3_BUCKET_NAME="my-cache-bucket"
-export SERVICE_ACCESS_TOKEN="my-secure-token"
-
-# Specify other values via CLI
-./nx-cache-aws --port 8080
-```
-
 > **Note:** AWS credentials and region are optional when running on AWS infrastructure (EC2, ECS, Lambda) or when AWS config files are present. The server will auto-discover them from your environment.
 
 #### Step 3: Run the server
+
 ```bash
 docker run --rm -p 3000:3000 \
   -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
@@ -94,9 +68,11 @@ docker run --rm -p 3000:3000 \
 ```
 
 #### Step 4 (optional): Verify the service is up and running
+
 ```bash
 curl http://localhost:3000/health
 ```
+
 You should receive an "OK" response.
 
 ### Client Configuration
@@ -121,7 +97,7 @@ For more details, see the [Nx documentation](https://nx.dev/recipes/running-task
 
 ### Protecting against cache poisoning (CVE-2025-36852 / CREEP)
 
-If untrusted contributors can run CI with cache **write** access (typically pull request builds), they can pre-seed the cache entry for a hash that a trusted branch will later compute — and the trusted build will replay the poisoned artifact ([CVE-2025-36852, "CREEP"](https://nx.dev/blog/cve-2025-36852-critical-cache-poisoning-vulnerability-creep)). Write-once semantics don't prevent this: the attack writes *first*, it never overwrites.
+If untrusted contributors can run CI with cache **write** access (typically pull request builds), they can pre-seed the cache entry for a hash that a trusted branch will later compute — and the trusted build will replay the poisoned artifact ([CVE-2025-36852, "CREEP"](https://nx.dev/blog/cve-2025-36852-critical-cache-poisoning-vulnerability-creep)). Write-once semantics don't prevent this: the attack writes _first_, it never overwrites.
 
 The mitigation is to keep untrusted jobs read-only. Configure a second token on the server:
 
