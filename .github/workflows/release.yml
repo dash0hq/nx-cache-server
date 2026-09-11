@@ -16,7 +16,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
 jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+
   validate:
     name: Validate Release
     runs-on: ubuntu-latest
@@ -24,9 +34,11 @@ jobs:
       version: ${{ steps.validate.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Validate version
         id: validate
@@ -36,7 +48,7 @@ jobs:
 
   build:
     name: Build Release Binaries
-    needs: validate
+    needs: [validate, check]
     strategy:
       fail-fast: true
       matrix:
@@ -65,19 +77,20 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Update Rust toolchain
-        run: |
-          rustup update stable
-          rustup default stable
+      - name: Install pinned Rust toolchain
+        run: rustup show
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
       - name: Build release binary
         run: |
-          cargo build --release --bin nx-cache-aws --target ${{ matrix.target }}
+          cargo build --locked --release --bin nx-cache-aws --target ${{ matrix.target }}
 
       - name: Prepare binary for release
         uses: ./.github/actions/prepare-binary
@@ -88,16 +101,18 @@ jobs:
 
   create-tag-and-release:
     name: Create Tag and GitHub Release
-    needs: [validate, build]
+    needs: [validate, check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Create GitHub release
         uses: ./.github/actions/create-release

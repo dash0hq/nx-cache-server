@@ -16,10 +16,26 @@ struct AwsCli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
-
     let cli = AwsCli::parse();
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
+    let level = if cli.server.debug {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+    // SDK debug traces can contain object keys and signed request details.
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::filter::filter_fn(
+                move |meta| meta.target().starts_with("nx_cache") && *meta.level() <= level,
+            )),
+        )
+        .init();
+    tracing::debug!(
+        max_upload_bytes = cli.server.max_upload_bytes,
+        max_uploads = cli.server.max_uploads,
+        "Upload limits"
+    );
 
     // Validate server configuration
     if let Err(e) = cli.server.validate().await {

@@ -1,10 +1,11 @@
 use crate::domain::storage::StorageProvider;
+use crate::server::error::ServerError;
 use crate::server::AppState;
 use axum::{
     extract::{Request, State},
-    http::{Method, StatusCode},
+    http::Method,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use subtle::ConstantTimeEq;
 
@@ -12,7 +13,7 @@ pub async fn auth_middleware<T>(
     State(state): State<AppState<T>>,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode>
+) -> Result<Response, ServerError>
 where
     T: StorageProvider,
 {
@@ -25,7 +26,7 @@ where
 
     let token = match token {
         Some(t) => t,
-        None => return Err(StatusCode::UNAUTHORIZED),
+        None => return Err(ServerError::Unauthorized),
     };
 
     // Constant-time comparisons for security. Both tokens are always
@@ -42,22 +43,57 @@ where
         .is_some_and(|read_only| bool::from(token.as_bytes().ct_eq(read_only.as_bytes())));
 
     if !is_read_write && !is_read_only {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ServerError::Unauthorized);
     }
 
-    // The read-only token may only read; writes require the service access
-    // token. This lets untrusted CI jobs (e.g. PR builds) use the cache
-    // without being able to poison it (CVE-2025-36852 / CREEP).
-    if !is_read_write && request.method() != Method::GET {
-        // Take the upload to completion before answering. Responding while the
-        // client is still sending leaves an unread request body, so the
-        // connection is closed under it: the client sees a write error rather
-        // than this 403, and Nx fails the task even though it treats a 403
-        // itself as "not stored, carry on". Only authenticated callers get
-        // here, so no untrusted body is read.
-        crate::server::drain_body(request.into_body()).await;
-        return Err(StatusCode::FORBIDDEN);
+    if request.method() == Method::GET {
+        return Ok(next.run(request).await);
     }
+    let permit = state
+        .uploads
+        .permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ServerError::Busy)?;
+    // Own the body and permit independently of the HTTP caller. Never abort a spool writer.
+    tokio::spawn(async move {
+        let uploads = state.uploads;
+        tracing::info!(
+            event = "uploads",
+            active = state.config.max_uploads - uploads.permits.available_permits()
+        );
+        let response = if !is_read_write {
+            match super::uploads::receive(request.into_body(), &state.config, None).await {
+                Ok(_) => ServerError::Forbidden.into_response(),
+                Err(error) => error.into_response(),
+            }
+        } else {
+            next.run(request).await
+        };
+        drop(permit);
+        tracing::info!(
+            event = "uploads",
+            active = state.config.max_uploads - uploads.permits.available_permits()
+        );
+        response
+    })
+    .await
+    .map_err(|_| ServerError::InternalError)
+}
 
-    Ok(next.run(request).await)
+pub async fn observe(request: Request, next: Next) -> Response {
+    let method = match *request.method() {
+        Method::GET => "GET",
+        Method::PUT => "PUT",
+        _ => "other",
+    };
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    tracing::info!(
+        event = "request",
+        method,
+        status = response.status().as_u16(),
+        elapsed_ms = start.elapsed().as_millis() as u64
+    );
+    response
 }

@@ -1,35 +1,22 @@
 pub mod error;
 pub mod handlers;
 pub mod middleware;
+pub mod uploads;
 pub mod validation;
 
 use crate::domain::{config::ServerConfig, storage::StorageProvider};
 use axum::{
-    body::Body,
     middleware::from_fn_with_state,
     routing::{get, put},
     Router,
 };
 use std::sync::Arc;
-use tokio_stream::StreamExt;
 
 #[derive(Clone)]
 pub struct AppState<T: StorageProvider> {
     pub storage: Arc<T>,
     pub config: Arc<ServerConfig>,
-}
-
-/// Read and discard a request body so the client can finish uploading before a
-/// response ends the exchange. An unread body forces the connection shut, which
-/// reaches the client as a write error instead of the status it was sent. A
-/// read error means the client is already gone — nothing left to drain.
-pub(crate) async fn drain_body(body: Body) {
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        if chunk.is_err() {
-            break;
-        }
-    }
+    pub uploads: Arc<uploads::Uploads>,
 }
 
 pub fn create_router<T: StorageProvider + Clone>(app_state: &AppState<T>) -> Router<AppState<T>> {
@@ -39,7 +26,8 @@ pub fn create_router<T: StorageProvider + Clone>(app_state: &AppState<T>) -> Rou
         .route_layer(from_fn_with_state(
             app_state.clone(),
             middleware::auth_middleware::<T>,
-        ));
+        ))
+        .route_layer(axum::middleware::from_fn(middleware::observe));
 
     // Combine public and protected routes
     Router::new()
@@ -54,14 +42,33 @@ pub async fn run_server<T: StorageProvider + Clone>(
     let app_state = AppState {
         storage: Arc::new(storage),
         config: Arc::new(config.clone()),
+        uploads: Arc::new(uploads::Uploads::new(config)?),
     };
 
+    let uploads = app_state.uploads.clone();
     let app = create_router::<T>(&app_state).with_state(app_state);
     let addr = std::net::SocketAddr::new(config.bind_address, config.port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!("Server running on {}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            #[cfg(unix)]
+            {
+                let mut terminate =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("SIGTERM handler");
+                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+            }
+            #[cfg(not(unix))]
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+    // Detached upload tasks retain permits through persistence and cleanup.
+    let _all = uploads
+        .permits
+        .acquire_many(config.max_uploads as u32)
+        .await;
 
     Ok(())
 }
@@ -71,7 +78,7 @@ mod tests {
     use super::*;
     use crate::domain::storage::StorageError;
     use axum::{
-        body::to_bytes,
+        body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
     use std::collections::HashMap;
@@ -80,7 +87,6 @@ mod tests {
         io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
         sync::RwLock,
     };
-    use tokio_util::io::ReaderStream;
     use tower::ServiceExt;
 
     #[derive(Clone)]
@@ -92,18 +98,16 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemoryStorage {
         entries: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+        fail_cleanup: bool,
     }
 
     #[async_trait::async_trait]
     impl StorageProvider for AbsentStorage {
-        async fn exists(&self, _hash: &str) -> Result<bool, StorageError> {
-            Ok(false)
-        }
-
         async fn store(
             &self,
             _hash: &str,
-            _data: ReaderStream<impl AsyncRead + Send + Unpin>,
+            _path: &std::path::Path,
+            _length: u64,
         ) -> Result<(), StorageError> {
             Ok(())
         }
@@ -118,16 +122,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageProvider for PresentStorage {
-        async fn exists(&self, _hash: &str) -> Result<bool, StorageError> {
-            Ok(true)
-        }
-
         async fn store(
             &self,
             _hash: &str,
-            _data: ReaderStream<impl AsyncRead + Send + Unpin>,
+            _path: &std::path::Path,
+            _length: u64,
         ) -> Result<(), StorageError> {
-            panic!("a collision must not reach storage")
+            Err(StorageError::AlreadyExists)
         }
 
         async fn retrieve(
@@ -140,20 +141,24 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageProvider for MemoryStorage {
-        async fn exists(&self, hash: &str) -> Result<bool, StorageError> {
-            Ok(self.entries.read().await.contains_key(hash))
-        }
-
         async fn store(
             &self,
             hash: &str,
-            mut data: ReaderStream<impl AsyncRead + Send + Unpin>,
+            path: &std::path::Path,
+            _length: u64,
         ) -> Result<(), StorageError> {
-            let mut bytes = Vec::new();
-            while let Some(chunk) = data.next().await {
-                bytes.extend_from_slice(&chunk.map_err(|_| StorageError::OperationFailed)?);
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|_| StorageError::OperationFailed)?;
+            if self.fail_cleanup {
+                std::fs::remove_file(path).unwrap();
+                std::fs::create_dir(path).unwrap(); // Inject an unlink failure on every OS.
             }
-            self.entries.write().await.insert(hash.to_owned(), bytes);
+            let mut entries = self.entries.write().await;
+            if entries.contains_key(hash) {
+                return Err(StorageError::AlreadyExists);
+            }
+            entries.insert(hash.to_owned(), bytes);
             Ok(())
         }
 
@@ -179,6 +184,10 @@ mod tests {
             service_access_token: "read-write-token".to_string(),
             read_only_access_token: Some("read-only-token".to_string()),
             debug: false,
+            max_upload_bytes: 16 * 1024 * 1024,
+            max_uploads: 2,
+            upload_timeout_seconds: 1,
+            spool_directory: std::path::PathBuf::new(),
         }
     }
 
@@ -191,18 +200,261 @@ mod tests {
             .unwrap()
     }
 
-    fn test_app<T: StorageProvider + Clone>(storage: T) -> Router {
+    fn test_app<T: StorageProvider + Clone>(storage: T) -> (Router, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.spool_directory = directory.path().join("spool");
         let app_state = AppState {
             storage: Arc::new(storage),
-            config: Arc::new(test_config()),
+            uploads: Arc::new(uploads::Uploads::new(&config).unwrap()),
+            config: Arc::new(config),
         };
-        create_router(&app_state).with_state(app_state)
+        (create_router(&app_state).with_state(app_state), directory)
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_is_not_reported_as_success() {
+        let (app, _directory) = test_app(MemoryStorage {
+            fail_cleanup: true,
+            ..Default::default()
+        });
+        let response = app
+            .oneshot(authorized_request(
+                "PUT",
+                "/v1/cache/cleanup",
+                Body::from("artifact"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_persistence_retains_the_spool_and_permit() {
+        #[derive(Clone, Default)]
+        struct PausedStorage {
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl StorageProvider for PausedStorage {
+            async fn store(
+                &self,
+                _: &str,
+                path: &std::path::Path,
+                length: u64,
+            ) -> Result<(), StorageError> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                assert_eq!(length, 9);
+                assert_eq!(tokio::fs::read(path).await.unwrap(), b"persisted");
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _: &str,
+            ) -> Result<Box<dyn AsyncRead + Send + Unpin>, StorageError> {
+                Err(StorageError::NotFound)
+            }
+        }
+        let storage = PausedStorage::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.max_uploads = 1;
+        config.spool_directory = directory.path().join("spool");
+        let state = AppState {
+            storage: Arc::new(storage.clone()),
+            uploads: Arc::new(uploads::Uploads::new(&config).unwrap()),
+            config: Arc::new(config),
+        };
+        let app = create_router(&state).with_state(state.clone());
+        let caller = tokio::spawn(app.clone().oneshot(authorized_request(
+            "PUT",
+            "/v1/cache/persist",
+            Body::from("persisted"),
+        )));
+        storage.entered.notified().await;
+        caller.abort();
+        assert_eq!(state.uploads.permits.available_permits(), 0);
+        assert_eq!(
+            std::fs::read_dir(&state.uploads.directory).unwrap().count(),
+            2
+        );
+        storage.release.notify_one();
+        let _permit = state.uploads.permits.acquire().await.unwrap();
+        assert_eq!(
+            std::fs::read_dir(&state.uploads.directory).unwrap().count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_matrix_and_exact_nx_error_content_type() {
+        for (token, method, status) in [
+            (None, "GET", 401),
+            (Some("invalid"), "PUT", 401),
+            (Some("read-only-token"), "GET", 404),
+            (Some("read-only-token"), "PUT", 403),
+            (Some("read-write-token"), "GET", 404),
+            (Some("read-write-token"), "PUT", 200),
+        ] {
+            let (app, _directory) = test_app(MemoryStorage::default());
+            let mut request = Request::builder().method(method).uri("/v1/cache/matrix");
+            if let Some(token) = token {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
+            if status == 401 {
+                assert_eq!(response.headers()["content-type"], "text/plain");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_boundaries_lengths_and_cleanup() {
+        for (actual, declared, expected) in [
+            (16, None, 200),
+            (17, None, 413),
+            (7, Some(6), 400),
+            (7, Some(8), 400),
+            (16, Some(16), 200),
+            (1, Some(17), 413),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut config = test_config();
+            config.max_upload_bytes = 16;
+            config.spool_directory = directory.path().join("spool");
+            let storage = MemoryStorage::default();
+            let state = AppState {
+                storage: Arc::new(storage.clone()),
+                uploads: Arc::new(uploads::Uploads::new(&config).unwrap()),
+                config: Arc::new(config),
+            };
+            let app = create_router(&state).with_state(state.clone());
+            let mut request =
+                authorized_request("PUT", "/v1/cache/length", Body::from(vec![0x79; actual]));
+            if let Some(length) = declared {
+                request
+                    .headers_mut()
+                    .insert("content-length", length.to_string().parse().unwrap());
+            }
+            assert_eq!(
+                app.oneshot(request).await.unwrap().status().as_u16(),
+                expected
+            );
+            assert_eq!(
+                std::fs::read_dir(&state.uploads.directory).unwrap().count(),
+                1,
+                "only the lock remains"
+            );
+            assert_eq!(
+                storage.entries.read().await.contains_key("length"),
+                expected == 200
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_release_capacity_before_body_timeout_and_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.max_uploads = 1;
+        config.spool_directory = directory.path().join("spool");
+        let storage = MemoryStorage::default();
+        let state = AppState {
+            storage: Arc::new(storage.clone()),
+            uploads: Arc::new(uploads::Uploads::new(&config).unwrap()),
+            config: Arc::new(config),
+        };
+        let app = create_router(&state).with_state(state.clone());
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(1);
+        sender
+            .send(Ok(axum::body::Bytes::from_static(b"partial")))
+            .await
+            .unwrap();
+        let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver));
+        let task = tokio::spawn(app.clone().oneshot(authorized_request(
+            "PUT",
+            "/v1/cache/slow",
+            body,
+        )));
+        while state.uploads.permits.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        let response = app
+            .oneshot(authorized_request("PUT", "/v1/cache/busy", Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let _permit = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            state.uploads.permits.acquire(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(storage.entries.read().await.is_empty());
+        assert_eq!(
+            std::fs::read_dir(&state.uploads.directory).unwrap().count(),
+            1
+        );
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn invalid_auth_does_not_read_an_unending_body() {
+        let (app, _directory) = test_app(AbsentStorage);
+        let body = Body::from_stream(tokio_stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >());
+        let request = Request::put("/v1/cache/auth").body(body).unwrap();
+        let response =
+            tokio::time::timeout(std::time::Duration::from_millis(100), app.oneshot(request))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn config_and_exclusive_spool_recovery() {
+        use crate::domain::config::ConfigValidator;
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.port = 3000;
+        config.spool_directory = directory.path().join("spool");
+        assert!(config.validate().await.is_ok());
+        let owner = uploads::Uploads::new(&config).unwrap();
+        let stale = owner.directory.join("upload-abandoned");
+        std::fs::write(&stale, "abandoned").unwrap();
+        assert!(uploads::Uploads::new(&config).is_err());
+        assert!(stale.exists());
+        drop(owner);
+        let _owner = uploads::Uploads::new(&config).unwrap();
+        assert!(!stale.exists());
+        config.read_only_access_token = Some(config.service_access_token.clone());
+        assert!(config.validate().await.is_err());
+        config.read_only_access_token = Some(String::new());
+        assert!(config.validate().await.is_err());
+        config.read_only_access_token = None;
+        config.max_uploads = 0;
+        assert!(config.validate().await.is_err());
+        for hash in ["../key", "é", "", &"a".repeat(129)] {
+            assert!(validation::validate_hash(hash).is_err());
+        }
+        assert!(validation::validate_hash("A0-b_c").is_ok());
     }
 
     #[tokio::test]
     async fn successful_upload_returns_ok_and_preserves_artifact_bytes() {
         let storage = MemoryStorage::default();
-        let app = test_app(storage.clone());
+        let (app, _directory) = test_app(storage.clone());
         let artifact = b"exact artifact bytes\0\xff";
 
         let response = app
@@ -226,7 +478,7 @@ mod tests {
             .write()
             .await
             .insert("deadbeef".to_owned(), artifact.to_vec());
-        let app = test_app(storage);
+        let (app, _directory) = test_app(storage);
 
         let response = app
             .oneshot(authorized_request(
@@ -256,7 +508,7 @@ mod tests {
             .write()
             .await
             .insert("deadbeef".to_owned(), artifact.to_vec());
-        let app = test_app(storage.clone());
+        let (app, _directory) = test_app(storage.clone());
 
         let response = app
             .oneshot(authorized_request(
@@ -272,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_is_public() {
-        let app = test_app(MemoryStorage::default());
+        let (app, _directory) = test_app(MemoryStorage::default());
         let response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -286,11 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn collision_is_reported_without_closing_the_upload() {
-        let app_state = AppState {
-            storage: Arc::new(PresentStorage),
-            config: Arc::new(test_config()),
-        };
-        let app = create_router::<PresentStorage>(&app_state).with_state(app_state);
+        let (app, _directory) = test_app(PresentStorage);
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -338,11 +586,7 @@ mod tests {
     /// client only ever sees a write error.
     #[tokio::test]
     async fn read_only_write_is_refused_without_closing_the_upload() {
-        let app_state = AppState {
-            storage: Arc::new(AbsentStorage),
-            config: Arc::new(test_config()),
-        };
-        let app = create_router::<AbsentStorage>(&app_state).with_state(app_state);
+        let (app, _directory) = test_app(AbsentStorage);
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

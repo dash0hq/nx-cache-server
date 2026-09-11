@@ -1,0 +1,5 @@
+{
+  "name": "nx-cache-protocol-fixture",
+  "private": true,
+  "devDependencies": { "nx": "23.1.1" }
+}

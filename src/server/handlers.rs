@@ -3,37 +3,55 @@ use crate::server::{error::ServerError, validation, AppState};
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 
 pub async fn store_artifact<T: StorageProvider>(
     Path(hash): Path<String>,
     State(state): State<AppState<T>>,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     validation::validate_hash(&hash)?;
-
-    if state.storage.exists(&hash).await? {
-        // Same reason as the 403 in auth_middleware: let the client finish
-        // uploading, or it never sees this 409. Keys are content-addressed, so
-        // the copy being discarded is byte-identical to the stored one.
-        crate::server::drain_body(body).await;
-        return Ok((StatusCode::CONFLICT, "Cannot override an existing record"));
+    let declared = headers
+        .get("content-length")
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or(ServerError::BadRequest)
+        })
+        .transpose()?;
+    if declared.is_some_and(|n| n > state.config.max_upload_bytes) {
+        return Err(ServerError::TooLarge);
     }
-
-    // For now, let's use a simpler approach - collect the body into bytes
-    // TODO: Implement true streaming later for better memory efficiency
-    let bytes = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|_| ServerError::BadRequest)?;
-
-    let cursor = std::io::Cursor::new(bytes);
-    let reader_stream = tokio_util::io::ReaderStream::new(cursor);
-
-    state.storage.store(&hash, reader_stream).await?;
-
-    Ok((StatusCode::OK, ""))
+    let spool = tempfile::Builder::new()
+        .prefix("upload-")
+        .tempfile_in(&state.uploads.directory)
+        .map_err(|_| ServerError::InternalError)?;
+    let (file, path) = spool.into_parts();
+    let mut file = tokio::fs::File::from_std(file);
+    let received = super::uploads::receive(body, &state.config, Some(&mut file)).await;
+    drop(file);
+    let bytes = received.as_ref().ok().copied();
+    tracing::info!(event = "spool", added_bytes = bytes);
+    let result = async {
+        let bytes = received?;
+        if declared.is_some_and(|n| n != bytes) {
+            return Err(ServerError::BadRequest);
+        }
+        state.storage.store(&hash, &path, bytes).await?;
+        Ok((StatusCode::OK, ""))
+    }
+    .await;
+    path.close().map_err(|_| {
+        tracing::error!(event = "spool", cleanup_error = true);
+        ServerError::InternalError
+    })?;
+    tracing::info!(event = "spool", removed_bytes = bytes);
+    result
 }
 
 pub async fn retrieve_artifact<T: StorageProvider>(

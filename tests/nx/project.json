@@ -1,0 +1,12 @@
+{
+  "name": "artifact",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": ["{projectRoot}/input.bin", "{projectRoot}/task.cjs", "{projectRoot}/project.json"],
+      "outputs": ["{projectRoot}/out"],
+      "options": { "command": "node task.cjs" }
+    }
+  }
+}

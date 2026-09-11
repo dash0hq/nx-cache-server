@@ -17,12 +17,22 @@ runs:
     - name: Validate version format and availability
       id: validate
       shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
       run: |
         # Single source of truth for version validation (supports prereleases)
-        if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$ ]]; then
+        if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$ ]]; then
           echo "❌ Invalid version format. Use semantic versioning with 'v' prefix"
           exit 1
         fi
         echo "✅ Version format is valid"
         
-        echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+        test "$GITHUB_REF" = "refs/heads/master"
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        if git rev-parse --verify --quiet "refs/tags/$VERSION"; then
+          echo "Tag already exists"
+          exit 1
+        fi
+        PACKAGE_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+        test "${VERSION#v}" = "$PACKAGE_VERSION"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"

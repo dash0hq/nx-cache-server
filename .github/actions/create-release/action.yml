@@ -17,52 +17,34 @@ runs:
   using: composite
   steps:
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       with:
         path: artifacts
+        pattern: nx-cache-aws-*
 
     - name: Prepare release assets and checksums
       shell: bash
       run: |
         mkdir -p release-assets
         find artifacts -name "nx-cache-aws*" -type f -exec cp {} release-assets/ \;
+        test "$(find release-assets -type f | wc -l)" -eq 5
         cd release-assets
         sha256sum * > checksums.txt
+        sha256sum --check checksums.txt
 
     - name: Create Release
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        VERSION: ${{ inputs.version }}
+        RELEASE_NOTES: ${{ inputs.release-notes }}
       run: |
-        # Sanitize release notes to prevent injection
-        RELEASE_NOTES='${{ inputs.release-notes }}'
-        if [[ -z "$RELEASE_NOTES" ]]; then
-          RELEASE_NOTES="Release ${{ inputs.version }}"
-        fi
-        
-        # Check if this is a prerelease version
-        PRERELEASE_FLAG=""
-        if [[ "${{ inputs.version }}" =~ -[a-zA-Z] ]]; then
-          PRERELEASE_FLAG="--prerelease"
-          echo "🧪 Detected prerelease version: ${{ inputs.version }}"
-        else
-          echo "🚀 Creating stable release: ${{ inputs.version }}"
-        fi
-        
-        # Use heredoc to safely handle release notes with special characters
-        gh release create "${{ inputs.version }}" --title "${{ inputs.version }}" --notes "$RELEASE_NOTES" $PRERELEASE_FLAG release-assets/*
-
-    - name: Release Summary
-      shell: bash
-      run: |
-        echo "## 🎉 Release Created Successfully!" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Version:** ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Tag:** [${{ inputs.version }}](https://github.com/${{ github.repository }}/releases/tag/${{ inputs.version }})" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📦 Release Assets:" >> $GITHUB_STEP_SUMMARY
-        echo "- **Linux x86_64:** \`nx-cache-aws-${{ inputs.version }}-linux-x86_64\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **macOS x86_64:** \`nx-cache-aws-${{ inputs.version }}-macos-x86_64\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **macOS ARM64:** \`nx-cache-aws-${{ inputs.version }}-macos-arm64\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Windows x86_64:** \`nx-cache-aws-${{ inputs.version }}-windows-x86_64.exe\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Checksums:** \`checksums.txt\`" >> $GITHUB_STEP_SUMMARY
+        printf '%s\n' "${RELEASE_NOTES:-Release $VERSION}" > release-notes.txt
+        flags=()
+        if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+        # Recheck immediately before publishing; never point a release at an existing tag.
+        gh auth setup-git
+        remote_tags=$(git ls-remote --tags origin "refs/tags/$VERSION")
+        test -z "$remote_tags"
+        gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" \
+          --notes-file release-notes.txt "${flags[@]}" release-assets/*

@@ -139,6 +139,15 @@ pub struct ServerConfig {
 
     #[arg(long, env = "DEBUG", help = "Enable debug logging")]
     pub debug: bool,
+
+    #[arg(long, env = "MAX_UPLOAD_BYTES", default_value = "268435456")]
+    pub max_upload_bytes: u64,
+    #[arg(long, env = "MAX_UPLOADS", default_value = "4")]
+    pub max_uploads: usize,
+    #[arg(long, env = "UPLOAD_TIMEOUT_SECONDS", default_value = "120")]
+    pub upload_timeout_seconds: u64,
+    #[arg(long, env = "SPOOL_DIRECTORY", default_value = "/tmp/nx-cache-spool")]
+    pub spool_directory: std::path::PathBuf,
 }
 
 impl ConfigValidator for ServerConfig {
@@ -162,6 +171,18 @@ impl ConfigValidator for ServerConfig {
 
         if self.port == 0 {
             return Err(ConfigError::Invalid("port must be greater than 0"));
+        }
+
+        if self.max_upload_bytes == 0
+            || self.max_upload_bytes > 5 * 1024 * 1024 * 1024
+            || self.max_uploads == 0
+            || self.max_uploads > 1024
+            || self.upload_timeout_seconds == 0
+            || self.upload_timeout_seconds > 3600
+        {
+            return Err(ConfigError::Invalid(
+                "upload bytes must be 1..=5 GiB, uploads 1..=1024, timeout 1..=3600 seconds",
+            ));
         }
 
         Ok(())

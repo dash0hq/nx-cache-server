@@ -10,15 +10,13 @@ use aws_credential_types::provider::future::ProvideCredentials as ProvideCredent
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::config::SharedHttpClient;
 use aws_sdk_s3::config::{Credentials, ProvideCredentials};
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::operation::get_object::GetObjectError;
-use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::{config::Region, Client, Config as S3Config};
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};
 use clap::Parser;
 use tokio::io::AsyncRead;
-use tokio_stream::StreamExt;
-use tokio_util::io::ReaderStream;
 
 use crate::domain::{
     config::{ConfigError, ConfigValidator},
@@ -88,6 +86,9 @@ pub struct AwsStorageConfig {
         help = "S3 operation timeout in seconds"
     )]
     pub timeout_seconds: u64,
+
+    #[arg(long, env = "S3_PREFIX", default_value = "nx-cache")]
+    pub prefix: String,
 }
 
 impl ProvideRegion for AwsStorageConfig {
@@ -151,6 +152,20 @@ impl ConfigValidator for AwsStorageConfig {
         if self.bucket_name.is_empty() {
             return Err(ConfigError::MissingField("S3_BUCKET_NAME"));
         }
+        if self.timeout_seconds == 0 || self.timeout_seconds > 300 {
+            return Err(ConfigError::Invalid("S3_TIMEOUT must be 1..=300 seconds"));
+        }
+        if self.prefix.is_empty()
+            || self.prefix.len() > 128
+            || !self
+                .prefix
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return Err(ConfigError::Invalid(
+                "S3_PREFIX must be a 1..=128 byte ASCII alphanumeric, hyphen or underscore segment",
+            ));
+        }
         if let Some(endpoint_url) = &self.endpoint_url {
             if !endpoint_url.starts_with("http://") && !endpoint_url.starts_with("https://") {
                 return Err(ConfigError::Invalid(
@@ -175,6 +190,7 @@ impl ConfigValidator for AwsStorageConfig {
 pub struct S3Storage {
     client: Client,
     bucket_name: String,
+    prefix: String,
 }
 
 impl S3Storage {
@@ -210,86 +226,213 @@ impl S3Storage {
         Ok(Self {
             client,
             bucket_name: config.bucket_name.clone(),
+            prefix: config.prefix.clone(),
         })
     }
 }
 
 #[async_trait]
 impl StorageProvider for S3Storage {
-    async fn exists(&self, hash: &str) -> Result<bool, StorageError> {
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket_name)
-            .key(hash)
-            .send()
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(e) => match e.into_service_error() {
-                HeadObjectError::NotFound(_) => Ok(false),
-                other => {
-                    tracing::error!("S3 head_object failed: {:?}", other);
-                    Err(StorageError::OperationFailed)
-                }
-            },
-        }
-    }
-
     async fn store(
         &self,
         hash: &str,
-        mut data: ReaderStream<impl AsyncRead + Send + Unpin>,
+        path: &std::path::Path,
+        length: u64,
     ) -> Result<(), StorageError> {
-        if self.exists(hash).await? {
-            return Err(StorageError::AlreadyExists);
+        use aws_sdk_s3::{
+            config::retry::RetryConfig,
+            primitives::{ByteStream, Length},
+        };
+        for attempt in 0..3 {
+            let body = ByteStream::read_from()
+                .path(path)
+                .length(Length::Exact(length))
+                .build()
+                .await
+                .map_err(|_| StorageError::OperationFailed)?;
+            let start = std::time::Instant::now();
+            let result = self
+                .client
+                .put_object()
+                .bucket(&self.bucket_name)
+                .key(format!("{}/{}", self.prefix, hash))
+                .if_none_match("*")
+                .content_length(length as i64)
+                .body(body)
+                .customize()
+                .config_override(S3Config::builder().retry_config(RetryConfig::disabled()))
+                .send()
+                .await;
+            tracing::info!(
+                event = "s3",
+                operation = "put",
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                error = result.is_err(),
+                bytes = length
+            );
+            let Err(error) = result else {
+                return Ok(());
+            };
+            let status = error.raw_response().map(|r| r.status().as_u16());
+            let code = error.as_service_error().and_then(|e| e.code());
+            match put_failure(status, code) {
+                PutFailure::Exists => return Err(StorageError::AlreadyExists),
+                PutFailure::Retry if attempt < 2 => (),
+                _ => return Err(StorageError::OperationFailed),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1))).await;
         }
-
-        // For simplicity, read all data into memory first
-        // TODO: Implement true streaming for better memory efficiency
-        let mut buffer = Vec::new();
-        while let Some(chunk) = data.next().await {
-            let chunk = chunk.map_err(|_| StorageError::OperationFailed)?;
-            buffer.extend_from_slice(&chunk);
-        }
-
-        let body = aws_sdk_s3::primitives::ByteStream::from(buffer);
-
-        self.client
-            .put_object()
-            .bucket(&self.bucket_name)
-            .key(hash)
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("S3 put_object failed: {:?}", e);
-                StorageError::OperationFailed
-            })?;
-
-        Ok(())
+        Err(StorageError::OperationFailed)
     }
 
     async fn retrieve(
         &self,
         hash: &str,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, StorageError> {
+        let start = std::time::Instant::now();
         let result = self
             .client
             .get_object()
             .bucket(&self.bucket_name)
-            .key(hash)
+            .key(format!("{}/{}", self.prefix, hash))
             .send()
             .await
             .map_err(|e| match e.into_service_error() {
                 GetObjectError::NoSuchKey(_) => StorageError::NotFound,
-                other => {
-                    tracing::error!("S3 get_object failed: {:?}", other);
+                _ => {
+                    tracing::error!(event = "s3", operation = "get", error = true);
                     StorageError::OperationFailed
                 }
             })?;
+        tracing::info!(
+            event = "s3",
+            operation = "get",
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            bytes = result.content_length().unwrap_or(0)
+        );
 
         // Direct streaming - no buffering
         Ok(Box::new(result.body.into_async_read()))
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum PutFailure {
+    Exists,
+    Retry,
+    Failed,
+}
+
+fn put_failure(status: Option<u16>, code: Option<&str>) -> PutFailure {
+    match (status, code) {
+        (Some(412), Some("PreconditionFailed")) => PutFailure::Exists,
+        (Some(409), Some("ConditionalRequestConflict")) => PutFailure::Retry,
+        _ => PutFailure::Failed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn conditional_retries_replay_the_complete_body_and_stop_after_three_attempts() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::{Request, StatusCode},
+            routing::put,
+            Router,
+        };
+        use std::sync::{Arc, Mutex};
+        let payload = b"asymmetric replay\0\xff0123456789";
+        for (status, code, expected_attempts) in [
+            (409, "ConditionalRequestConflict", 3),
+            (409, "OtherConflict", 1),
+            (412, "PreconditionFailed", 1),
+        ] {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let captured = received.clone();
+            let app = Router::new().route(
+                "/bucket/prefix/key",
+                put(move |request: Request<Body>| {
+                    let captured = captured.clone();
+                    async move {
+                        assert_eq!(request.headers()["if-none-match"], "*");
+                        let body = to_bytes(request.into_body(), 8192).await.unwrap();
+                        captured.lock().unwrap().push(body);
+                        (
+                            StatusCode::from_u16(status).unwrap(),
+                            [("content-type", "application/xml")],
+                            format!("<Error><Code>{code}</Code></Error>"),
+                        )
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let storage = S3Storage::new(&AwsStorageConfig {
+                region: Some("us-east-1".into()),
+                access_key_id: Some("local".into()),
+                secret_access_key: Some("local-secret".into()),
+                session_token: None,
+                bucket_name: "bucket".into(),
+                endpoint_url: Some(endpoint),
+                timeout_seconds: 2,
+                prefix: "prefix".into(),
+            })
+            .await
+            .unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), payload).unwrap();
+            let result = storage
+                .store("key", file.path(), payload.len() as u64)
+                .await;
+            assert!(result.is_err());
+            assert_eq!(
+                matches!(result, Err(StorageError::AlreadyExists)),
+                status == 412
+            );
+            let bodies = received.lock().unwrap();
+            assert_eq!(bodies.len(), expected_attempts);
+            // Decode aws-chunked framing; chunk boundaries can differ between attempts.
+            for body in bodies.iter() {
+                let mut encoded = body.as_ref();
+                let mut decoded = Vec::new();
+                loop {
+                    let end = encoded.windows(2).position(|w| w == b"\r\n").unwrap();
+                    let line = std::str::from_utf8(&encoded[..end]).unwrap();
+                    let size = usize::from_str_radix(line.split(';').next().unwrap(), 16).unwrap();
+                    if size == 0 {
+                        break;
+                    }
+                    encoded = &encoded[end + 2..];
+                    decoded.extend_from_slice(&encoded[..size]);
+                    encoded = &encoded[size + 2..];
+                }
+                assert_eq!(decoded, payload);
+            }
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn conditional_errors_are_not_generic_http_conflicts() {
+        assert_eq!(
+            put_failure(Some(412), Some("PreconditionFailed")),
+            PutFailure::Exists
+        );
+        assert_eq!(
+            put_failure(Some(409), Some("ConditionalRequestConflict")),
+            PutFailure::Retry
+        );
+        for (status, code) in [
+            (409, "Other"),
+            (412, "AccessDenied"),
+            (500, "PreconditionFailed"),
+            (403, "AccessDenied"),
+        ] {
+            assert_eq!(put_failure(Some(status), Some(code)), PutFailure::Failed);
+        }
     }
 }
