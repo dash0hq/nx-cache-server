@@ -106,10 +106,6 @@ impl fmt::Display for ConfigError {
     }
 }
 
-pub trait ConfigValidator {
-    fn validate(&self) -> impl std::future::Future<Output = Result<(), ConfigError>>;
-}
-
 #[derive(Parser, Debug, Clone)]
 pub struct ServerConfig {
     #[arg(long, env = "PORT", default_value = "3000", help = "HTTP server port")]
@@ -142,16 +138,10 @@ pub struct ServerConfig {
 
     #[arg(long, env = "MAX_UPLOAD_BYTES", default_value = "268435456")]
     pub max_upload_bytes: u64,
-    #[arg(long, env = "MAX_UPLOADS", default_value = "4")]
-    pub max_uploads: usize,
-    #[arg(long, env = "UPLOAD_TIMEOUT_SECONDS", default_value = "120")]
-    pub upload_timeout_seconds: u64,
-    #[arg(long, env = "SPOOL_DIRECTORY", default_value = "/tmp/nx-cache-spool")]
-    pub spool_directory: std::path::PathBuf,
 }
 
-impl ConfigValidator for ServerConfig {
-    async fn validate(&self) -> Result<(), ConfigError> {
+impl ServerConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.service_access_token.is_empty() {
             return Err(ConfigError::MissingField("SERVICE_ACCESS_TOKEN"));
         }
@@ -172,16 +162,9 @@ impl ConfigValidator for ServerConfig {
         if self.port == 0 {
             return Err(ConfigError::Invalid("port must be greater than 0"));
         }
-
-        if self.max_upload_bytes == 0
-            || self.max_upload_bytes > 5 * 1024 * 1024 * 1024
-            || self.max_uploads == 0
-            || self.max_uploads > 1024
-            || self.upload_timeout_seconds == 0
-            || self.upload_timeout_seconds > 3600
-        {
+        if self.max_upload_bytes == 0 || self.max_upload_bytes > 5 * 1024 * 1024 * 1024 {
             return Err(ConfigError::Invalid(
-                "upload bytes must be 1..=5 GiB, uploads 1..=1024, timeout 1..=3600 seconds",
+                "MAX_UPLOAD_BYTES must be between 1 byte and 5 GiB",
             ));
         }
 

@@ -13,14 +13,8 @@ pub enum ServerError {
     #[error("Unauthorized")]
     Unauthorized,
 
-    #[error("Forbidden")]
-    Forbidden,
     #[error("Artifact too large")]
     TooLarge,
-    #[error("Upload timed out")]
-    Timeout,
-    #[error("Upload capacity exhausted")]
-    Busy,
 
     #[error("Internal server error")]
     InternalError,
@@ -43,10 +37,7 @@ impl IntoResponse for ServerError {
             // HTTP-specific errors
             ServerError::BadRequest => (StatusCode::BAD_REQUEST, "Bad request"),
             ServerError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized"),
-            ServerError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden"),
             ServerError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "Artifact too large"),
-            ServerError::Timeout => (StatusCode::REQUEST_TIMEOUT, "Upload timed out"),
-            ServerError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "Upload capacity exhausted"),
 
             // Generic fallback - log details but return safe message
             _ => {

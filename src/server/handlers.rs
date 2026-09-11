@@ -3,61 +3,39 @@ use crate::server::{error::ServerError, validation, AppState};
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
 };
+use tokio::io::AsyncWriteExt;
+use tokio_stream::StreamExt;
 
 pub async fn store_artifact<T: StorageProvider>(
     Path(hash): Path<String>,
     State(state): State<AppState<T>>,
-    headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     validation::validate_hash(&hash)?;
-    let declared = headers
-        .get("content-length")
-        .map(|value| {
-            value
-                .to_str()
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .ok_or(ServerError::BadRequest)
-        })
-        .transpose()?;
-    if declared.is_some_and(|n| n > state.config.max_upload_bytes) {
-        return Err(ServerError::TooLarge);
-    }
-    let spool = tempfile::Builder::new()
-        .prefix("upload-")
-        .tempfile_in(&state.uploads.directory)
-        .map_err(|_| ServerError::InternalError)?;
+    let spool = tempfile::NamedTempFile::new().map_err(|_| ServerError::InternalError)?;
     let (file, path) = spool.into_parts();
     let mut file = tokio::fs::File::from_std(file);
-    let received = super::uploads::receive(body, &state.config, Some(&mut file)).await;
-    drop(file);
-    let bytes = received.as_ref().ok().copied();
-    if let Some(bytes) = bytes {
-        crate::telemetry::instruments()
-            .spool_size
-            .record(bytes, &[]);
-    }
-    tracing::info!(event = "spool", added_bytes = bytes);
-    let result = async {
-        let bytes = received?;
-        if declared.is_some_and(|n| n != bytes) {
-            return Err(ServerError::BadRequest);
+    let mut body = body.into_data_stream();
+    let mut length = 0u64;
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|_| ServerError::BadRequest)?;
+        length = length
+            .checked_add(chunk.len() as u64)
+            .ok_or(ServerError::TooLarge)?;
+        if length > state.config.max_upload_bytes {
+            return Err(ServerError::TooLarge);
         }
-        state.storage.store(&hash, &path, bytes).await?;
-        Ok((StatusCode::OK, ""))
+        file.write_all(&chunk)
+            .await
+            .map_err(|_| ServerError::InternalError)?;
     }
-    .await;
-    path.close().map_err(|_| {
-        crate::telemetry::instruments().cleanup_errors.add(1, &[]);
-        tracing::error!(event = "spool", cleanup_error = true);
-        ServerError::InternalError
-    })?;
-    tracing::info!(event = "spool", removed_bytes = bytes);
-    result
+    file.flush().await.map_err(|_| ServerError::InternalError)?;
+    state.storage.store(&hash, &path, length).await?;
+
+    Ok((StatusCode::OK, ""))
 }
 
 pub async fn retrieve_artifact<T: StorageProvider>(

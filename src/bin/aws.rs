@@ -1,5 +1,5 @@
 use clap::Parser;
-use nx_cache_server::domain::config::{ConfigValidator, ServerConfig};
+use nx_cache_server::domain::config::ServerConfig;
 use nx_cache_server::infra::aws::{AwsStorageConfig, S3Storage};
 use nx_cache_server::server::run_server;
 
@@ -16,29 +16,11 @@ struct AwsCli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let telemetry = nx_cache_server::telemetry::Telemetry::init()?;
     let cli = AwsCli::parse();
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
-    let level = if cli.server.debug {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
-    // SDK debug traces can contain object keys and signed request details.
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::filter::filter_fn(
-                move |meta| meta.target().starts_with("nx_cache") && *meta.level() <= level,
-            )),
-        )
-        .init();
-    tracing::debug!(
-        max_upload_bytes = cli.server.max_upload_bytes,
-        max_uploads = cli.server.max_uploads,
-        "Upload limits"
-    );
 
     // Validate server configuration
-    if let Err(e) = cli.server.validate().await {
+    if let Err(e) = cli.server.validate() {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -61,8 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Export only to explicitly configured OTLP endpoints. Never print exporter configuration.
-    let telemetry = nx_cache_server::telemetry::Telemetry::init()?;
     // Run server
     tracing::info!(
         "Server starting on {}",
@@ -71,5 +51,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = run_server(storage, &cli.server).await;
     tokio::task::spawn_blocking(move || telemetry.shutdown()).await?;
     result?;
+
     Ok(())
 }

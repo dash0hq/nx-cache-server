@@ -2,7 +2,6 @@
 name = "nx-cache-server"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.94.1"
 
 # AWS binary
 [[bin]]
@@ -22,10 +21,11 @@ async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
-opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"] }
-# Keep OTLP on ring too; reqwest's default rustls feature pulls in aws-lc.
+tracing-opentelemetry = "0.33"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-http = "0.32"
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 thiserror = "1.0"
@@ -39,13 +39,9 @@ aws-credential-types = "1.2.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }
-prost = "0.14"
 
 [profile.release]
 strip = true         # Remove all symbols
 lto = true           # Link-time optimization  
 codegen-units = 1    # Better optimization
-
-[profile.dev]
-debug = 0
+panic = "abort"      # Don't include unwinding code

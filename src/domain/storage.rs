@@ -14,8 +14,7 @@ pub enum StorageError {
 
 #[async_trait]
 pub trait StorageProvider: Send + Sync + 'static {
-    /// Atomically create an immutable object from a complete, private spool.
-    /// The caller keeps the path unchanged and alive until this returns.
+    /// Atomically create an object from a complete temporary file.
     async fn store(
         &self,
         hash: &str,
