@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# No services or authentication need repair. Check the snapshotted toolchain
+# without installing dependencies or contacting AWS.
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+cargo --version
+rustc --version
