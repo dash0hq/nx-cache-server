@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+TIMEFORMAT='Step completed in %3R seconds'
+
+echo 'Checking system build prerequisites'
+time {
+  missing=()
+  for package in build-essential ca-certificates curl; do
+    if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then
+      missing+=("$package")
+    fi
+  done
+  if ((${#missing[@]})); then
+    sudo apt-get update
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+  fi
+}
+
+echo 'Preparing stable Rust, matching the release workflow'
+time {
+  export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+  if ! command -v rustup >/dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+      sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+  fi
+  # Reuse the snapshot's stable toolchain instead of updating it on every setup.
+  if ! rustup run stable rustc --version >/dev/null 2>&1; then
+    rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+  else
+    installed="$(rustup component list --toolchain stable --installed)"
+    for component in rustfmt clippy; do
+      if ! grep -q "^${component}-" <<< "$installed"; then
+        rustup component add --toolchain stable "$component"
+      fi
+    done
+  fi
+  rustup default stable
+
+  # Amp and supervised services start in separate non-interactive login shells.
+  profile_line='export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"'
+  if ! grep -Fqx "$profile_line" "$HOME/.bash_profile" 2>/dev/null; then
+    printf '\n# Rust tools for Amp orbs\n%s\n' "$profile_line" >> "$HOME/.bash_profile"
+  fi
+  rustc --version
+  cargo --version
+}
+
+echo 'Fetching dependencies from Cargo.lock for the project snapshot'
+time cargo fetch --locked
+
+# Tests use in-memory storage. Do not authenticate AWS or start the server here.
+echo 'Orb setup finished'
