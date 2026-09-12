@@ -2,6 +2,16 @@
 
 A lightweight Nx cache server that bridges Nx CLI clients with S3-compatible storage.
 
+## Additions in the Dash0 fork
+
+Compared with the original [nxcite/nx-cache-server](https://github.com/nxcite/nx-cache-server), this fork adds:
+
+- Atomic write-once S3 uploads to prevent concurrent cache overwrites
+- Separate read-write and read-only tokens for trusted and untrusted builds
+- Bounded, disk-spooled uploads instead of buffering artifacts in memory
+- Optional OTLP HTTP traces with W3C context propagation and S3 child spans
+- A minimal container image published to `ghcr.io/dash0hq/nx-cache-server`
+
 ## Features
 
 - **AWS S3 Integration**: Direct streaming integration with AWS S3 and S3-compatible services
@@ -107,3 +117,7 @@ export READ_ONLY_ACCESS_TOKEN="your-ro-token"   # untrusted builds (PRs): read-o
 ```
 
 Then set `NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN` to the read-only token in PR pipelines and to the read-write token only in trusted-branch pipelines. A read-only token can retrieve artifacts as usual but gets `403 Forbidden` on writes, so untrusted jobs still benefit from cache hits without being able to poison the cache.
+
+## License
+
+Licensed under Apache-2.0. The container image includes the project and bundled third-party license texts under `/licenses`.
