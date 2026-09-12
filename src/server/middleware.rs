@@ -6,7 +6,11 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use opentelemetry::global;
+use opentelemetry_http::HeaderExtractor;
 use subtle::ConstantTimeEq;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub async fn auth_middleware<T>(
     State(state): State<AppState<T>>,
@@ -60,4 +64,24 @@ where
     }
 
     Ok(next.run(request).await)
+}
+
+pub async fn trace_request(request: Request, next: Next) -> Response {
+    let span = tracing::info_span!(
+        "http.request",
+        otel.kind = "server",
+        http.request.method = %request.method(),
+        http.route = "/v1/cache/{hash}",
+        http.response.status_code = tracing::field::Empty,
+    );
+    let _ = span.set_parent(global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(request.headers()))
+    }));
+    async move {
+        let response = next.run(request).await;
+        tracing::Span::current().record("http.response.status_code", response.status().as_u16());
+        response
+    }
+    .instrument(span)
+    .await
 }

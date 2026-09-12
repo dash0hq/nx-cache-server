@@ -13,6 +13,12 @@ pub enum ServerError {
     #[error("Unauthorized")]
     Unauthorized,
 
+    #[error("Artifact too large")]
+    TooLarge,
+
+    #[error("Upload spool I/O failed: {0}")]
+    UploadIo(#[from] std::io::Error),
+
     #[error("Internal server error")]
     InternalError,
 
@@ -34,6 +40,7 @@ impl IntoResponse for ServerError {
             // HTTP-specific errors
             ServerError::BadRequest => (StatusCode::BAD_REQUEST, "Bad request"),
             ServerError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized"),
+            ServerError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "Artifact too large"),
 
             // Generic fallback - log details but return safe message
             _ => {

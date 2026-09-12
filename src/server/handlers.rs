@@ -6,6 +6,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use tokio::io::AsyncWriteExt;
+use tokio_stream::StreamExt;
 
 pub async fn store_artifact<T: StorageProvider>(
     Path(hash): Path<String>,
@@ -13,25 +15,23 @@ pub async fn store_artifact<T: StorageProvider>(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     validation::validate_hash(&hash)?;
-
-    if state.storage.exists(&hash).await? {
-        // Same reason as the 403 in auth_middleware: let the client finish
-        // uploading, or it never sees this 409. Keys are content-addressed, so
-        // the copy being discarded is byte-identical to the stored one.
-        crate::server::drain_body(body).await;
-        return Ok((StatusCode::CONFLICT, "Cannot override an existing record"));
+    let spool = tempfile::NamedTempFile::new()?;
+    let (file, path) = spool.into_parts();
+    let mut file = tokio::fs::File::from_std(file);
+    let mut body = body.into_data_stream();
+    let mut length = 0u64;
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|_| ServerError::BadRequest)?;
+        length = length
+            .checked_add(chunk.len() as u64)
+            .ok_or(ServerError::TooLarge)?;
+        if length > state.config.max_upload_bytes {
+            return Err(ServerError::TooLarge);
+        }
+        file.write_all(&chunk).await?;
     }
-
-    // For now, let's use a simpler approach - collect the body into bytes
-    // TODO: Implement true streaming later for better memory efficiency
-    let bytes = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|_| ServerError::BadRequest)?;
-
-    let cursor = std::io::Cursor::new(bytes);
-    let reader_stream = tokio_util::io::ReaderStream::new(cursor);
-
-    state.storage.store(&hash, reader_stream).await?;
+    file.flush().await?;
+    state.storage.store(&hash, &path, length).await?;
 
     Ok((StatusCode::OK, ""))
 }

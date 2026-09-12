@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::io::AsyncRead;
-use tokio_util::io::ReaderStream;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -15,15 +14,12 @@ pub enum StorageError {
 
 #[async_trait]
 pub trait StorageProvider: Send + Sync + 'static {
-    /// Check if an object exists at the given hash key
-    async fn exists(&self, hash: &str) -> Result<bool, StorageError>;
-
-    /// Store data stream to storage at the given hash key
-    /// Returns error if object already exists
+    /// Atomically create an object from a complete temporary file.
     async fn store(
         &self,
         hash: &str,
-        data: ReaderStream<impl AsyncRead + Send + Unpin>,
+        path: &std::path::Path,
+        length: u64,
     ) -> Result<(), StorageError>;
 
     /// Retrieve object as a stream from storage

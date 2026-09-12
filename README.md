@@ -1,18 +1,26 @@
 # Nx Custom Remote Cache Server
 
-[![Release](https://github.com/nxcite/nx-cache-server/actions/workflows/release.yml/badge.svg)](https://github.com/nxcite/nx-cache-server/actions/workflows/release.yml)
+A lightweight Nx cache server that bridges Nx CLI clients with S3-compatible storage.
 
-A lightweight, high-performance Nx cache server that bridges Nx CLI clients with cloud storage providers for caching build artifacts. Built in Rust with a focus on maximum performance and minimal memory usage - less than 4MB during regular operation! 🚀
+## Additions in the Dash0 fork
+
+Compared with the original [nxcite/nx-cache-server](https://github.com/nxcite/nx-cache-server), this fork adds:
+
+- Atomic write-once S3 uploads to prevent concurrent cache overwrites
+- Separate read-write and read-only tokens for trusted and untrusted builds
+- Bounded, disk-spooled uploads instead of buffering artifacts in memory
+- Optional OTLP HTTP traces with W3C context propagation and S3 child spans
+- A minimal container image published to `ghcr.io/dash0hq/nx-cache-server`
 
 ## Features
 
 - **AWS S3 Integration**: Direct streaming integration with AWS S3 and S3-compatible services
-- **Memory Efficient**: Direct streaming with less than 4MB RAM usage during typical operation
+- **Bounded uploads**: Uploads are streamed through temporary files with a configurable size limit
 - **High Performance**: Built with Rust and Axum for maximum throughput
-- **Zero Dependencies**: Self-contained single executable with no external dependencies required
+- **OpenTelemetry**: Optional OTLP HTTP traces for Dash0 or any compatible backend
 - **Nx API Compliant**: Full implementation of the [Nx custom remote cache OpenAPI specification](https://nx.dev/recipes/running-tasks/self-hosted-caching#build-your-own-caching-server)
 - **Security First**: Bearer token authentication with constant-time comparison
-- **Self-Hosted & Private**: Full control over your data with zero telemetry
+- **Self-Hosted & Private**: Telemetry is disabled unless an OTLP endpoint is configured
 
 ## Quick Start
 
@@ -22,32 +30,16 @@ Access to AWS S3 (or S3-compatible service like MinIO)
 
 ### Installation
 
-#### Step 1: Download the binary
-Go to [Releases page](https://github.com/nxcite/nx-cache-server/releases) and download the binary for your operating system.
+#### Step 1: Pull the image
 
-Alternatively, use command line tools:
 ```bash
-# Using curl
-curl -L https://github.com/nxcite/nx-cache-server/releases/download/<VERSION>/nx-cache-aws-<VERSION>-<PLATFORM> -o nx-cache-aws
-
-# Using wget
-wget https://github.com/nxcite/nx-cache-server/releases/download/<VERSION>/nx-cache-aws-<VERSION>-<PLATFORM> -O nx-cache-aws
-
-# Replace:
-#  <VERSION> with the version tag (e.g., v1.2.0)
-#  <PLATFORM> with your platform (e.g., linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64.exe).
+docker pull ghcr.io/dash0hq/nx-cache-server:latest
 ```
 
-#### Step 2: Make executable (Linux/macOS only)
-```bash
-chmod +x nx-cache-aws
-```
+#### Step 2: Configure the server
 
-#### Step 3: Configure the server
+Configure the server with environment variables:
 
-The server supports configuration via environment variables, command-line arguments, or both.
-
-##### Option A: Environment Variables (Recommended)
 ```bash
 # Required
 export S3_BUCKET_NAME="your-s3-bucket-name"
@@ -67,46 +59,30 @@ export S3_TIMEOUT="30"                          # S3 operation timeout in second
 export PORT="3000"                              # Server port (default: 3000)
 export BIND_ADDRESS="0.0.0.0"                   # IP to bind to (default: 0.0.0.0). Use "::" for IPv6/dual-stack
 export READ_ONLY_ACCESS_TOKEN="your-ro-token"   # Read-only token for untrusted CI jobs (see "Protecting against cache poisoning")
-```
-
-##### Option B: Command Line Arguments
-```bash
-./nx-cache-aws \
-  --region "your-aws-region" \
-  --access-key-id "your-aws-access-key-id" \
-  --secret-access-key "your-aws-secret-access-key" \
-  --bucket-name "your-s3-bucket-name" \
-  --session-token "your-session-token" \
-  --endpoint-url "your-s3-endpoint-url" \
-  --service-access-token "your-bearer-token" \
-  --timeout-seconds 30 \
-  --port 3000 \
-  --bind-address 0.0.0.0
-```
-
-##### Option C: Mixed Configuration
-You can also combine both methods. Command line arguments will override environment variables:
-```bash
-# Set common config via environment
-export AWS_REGION="us-west-2"
-export S3_BUCKET_NAME="my-cache-bucket"
-export SERVICE_ACCESS_TOKEN="my-secure-token"
-
-# Specify other values via CLI
-./nx-cache-aws --port 8080
+export MAX_UPLOAD_BYTES="268435456"              # Maximum upload size (default: 256 MiB)
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://your-dash0-otlp-http-endpoint:4318"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20your-token"
 ```
 
 > **Note:** AWS credentials and region are optional when running on AWS infrastructure (EC2, ECS, Lambda) or when AWS config files are present. The server will auto-discover them from your environment.
 
-#### Step 4: Run the server
+#### Step 3: Run the server
+
 ```bash
-./nx-cache-aws
+docker run --rm -p 3000:3000 \
+  -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+  -e S3_BUCKET_NAME -e S3_ENDPOINT_URL -e S3_TIMEOUT -e PORT -e BIND_ADDRESS \
+  -e SERVICE_ACCESS_TOKEN -e READ_ONLY_ACCESS_TOKEN \
+  -e MAX_UPLOAD_BYTES -e OTEL_EXPORTER_OTLP_ENDPOINT -e OTEL_EXPORTER_OTLP_HEADERS \
+  ghcr.io/dash0hq/nx-cache-server:latest
 ```
 
-#### Step 5 (optional): Verify the service is up and running
+#### Step 4 (optional): Verify the service is up and running
+
 ```bash
 curl http://localhost:3000/health
 ```
+
 You should receive an "OK" response.
 
 ### Client Configuration
@@ -131,7 +107,7 @@ For more details, see the [Nx documentation](https://nx.dev/recipes/running-task
 
 ### Protecting against cache poisoning (CVE-2025-36852 / CREEP)
 
-If untrusted contributors can run CI with cache **write** access (typically pull request builds), they can pre-seed the cache entry for a hash that a trusted branch will later compute — and the trusted build will replay the poisoned artifact ([CVE-2025-36852, "CREEP"](https://nx.dev/blog/cve-2025-36852-critical-cache-poisoning-vulnerability-creep)). Write-once semantics don't prevent this: the attack writes *first*, it never overwrites.
+If untrusted contributors can run CI with cache **write** access (typically pull request builds), they can pre-seed the cache entry for a hash that a trusted branch will later compute — and the trusted build will replay the poisoned artifact ([CVE-2025-36852, "CREEP"](https://nx.dev/blog/cve-2025-36852-critical-cache-poisoning-vulnerability-creep)). Write-once semantics don't prevent this: the attack writes _first_, it never overwrites.
 
 The mitigation is to keep untrusted jobs read-only. Configure a second token on the server:
 
@@ -142,12 +118,6 @@ export READ_ONLY_ACCESS_TOKEN="your-ro-token"   # untrusted builds (PRs): read-o
 
 Then set `NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN` to the read-only token in PR pipelines and to the read-write token only in trusted-branch pipelines. A read-only token can retrieve artifacts as usual but gets `403 Forbidden` on writes, so untrusted jobs still benefit from cache hits without being able to poison the cache.
 
----
+## License
 
-### Stay Updated. Watch this repository to get notified about new releases!
-
-<img width="369" height="387" alt="image" src="https://github.com/user-attachments/assets/97c4ebab-75a1-4f83-bc52-cf4ebbc73bfa" />
-
-<img width="465" height="366" alt="image" src="https://github.com/user-attachments/assets/512af549-0e9a-40ac-95bd-f9eea0da38a7" />
-
-
+Licensed under Apache-2.0. The container image includes the project and bundled third-party license texts under `/licenses`.

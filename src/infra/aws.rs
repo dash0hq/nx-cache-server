@@ -11,17 +11,15 @@ use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::config::SharedHttpClient;
 use aws_sdk_s3::config::{Credentials, ProvideCredentials};
 use aws_sdk_s3::operation::get_object::GetObjectError;
-use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::{config::Region, Client, Config as S3Config};
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::{tls, Builder as HttpClientBuilder};
 use clap::Parser;
 use tokio::io::AsyncRead;
-use tokio_stream::StreamExt;
-use tokio_util::io::ReaderStream;
+use tracing::Instrument;
 
 use crate::domain::{
-    config::{ConfigError, ConfigValidator},
+    config::ConfigError,
     storage::{StorageError, StorageProvider},
 };
 
@@ -146,8 +144,8 @@ impl ProvideCredentials for AwsStorageConfig {
     }
 }
 
-impl ConfigValidator for AwsStorageConfig {
-    async fn validate(&self) -> Result<(), ConfigError> {
+impl AwsStorageConfig {
+    pub async fn validate(&self) -> Result<(), ConfigError> {
         if self.bucket_name.is_empty() {
             return Err(ConfigError::MissingField("S3_BUCKET_NAME"));
         }
@@ -216,55 +214,49 @@ impl S3Storage {
 
 #[async_trait]
 impl StorageProvider for S3Storage {
-    async fn exists(&self, hash: &str) -> Result<bool, StorageError> {
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket_name)
-            .key(hash)
-            .send()
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(e) => match e.into_service_error() {
-                HeadObjectError::NotFound(_) => Ok(false),
-                other => {
-                    tracing::error!("S3 head_object failed: {:?}", other);
-                    Err(StorageError::OperationFailed)
-                }
-            },
-        }
-    }
-
     async fn store(
         &self,
         hash: &str,
-        mut data: ReaderStream<impl AsyncRead + Send + Unpin>,
+        path: &std::path::Path,
+        length: u64,
     ) -> Result<(), StorageError> {
-        if self.exists(hash).await? {
-            return Err(StorageError::AlreadyExists);
-        }
+        use aws_sdk_s3::primitives::{ByteStream, Length};
 
-        // For simplicity, read all data into memory first
-        // TODO: Implement true streaming for better memory efficiency
-        let mut buffer = Vec::new();
-        while let Some(chunk) = data.next().await {
-            let chunk = chunk.map_err(|_| StorageError::OperationFailed)?;
-            buffer.extend_from_slice(&chunk);
-        }
-
-        let body = aws_sdk_s3::primitives::ByteStream::from(buffer);
-
+        let body = ByteStream::read_from()
+            .path(path)
+            .length(Length::Exact(length))
+            .build()
+            .await
+            .map_err(|error| {
+                tracing::error!("S3 upload body failed: {:?}", error);
+                StorageError::OperationFailed
+            })?;
         self.client
             .put_object()
             .bucket(&self.bucket_name)
             .key(hash)
+            .if_none_match("*")
+            .content_length(length as i64)
             .body(body)
             .send()
+            .instrument(tracing::info_span!(
+                "s3.request",
+                otel.kind = "client",
+                rpc.system = "aws-api",
+                rpc.service = "S3",
+                rpc.method = "PutObject"
+            ))
             .await
-            .map_err(|e| {
-                tracing::error!("S3 put_object failed: {:?}", e);
-                StorageError::OperationFailed
+            .map_err(|error| {
+                if error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 412)
+                {
+                    StorageError::AlreadyExists
+                } else {
+                    tracing::error!("S3 put_object failed: {:?}", error);
+                    StorageError::OperationFailed
+                }
             })?;
 
         Ok(())
@@ -280,6 +272,13 @@ impl StorageProvider for S3Storage {
             .bucket(&self.bucket_name)
             .key(hash)
             .send()
+            .instrument(tracing::info_span!(
+                "s3.request",
+                otel.kind = "client",
+                rpc.system = "aws-api",
+                rpc.service = "S3",
+                rpc.method = "GetObject"
+            ))
             .await
             .map_err(|e| match e.into_service_error() {
                 GetObjectError::NoSuchKey(_) => StorageError::NotFound,

@@ -1,5 +1,5 @@
 use clap::Parser;
-use nx_cache_server::domain::config::{ConfigValidator, ServerConfig};
+use nx_cache_server::domain::config::ServerConfig;
 use nx_cache_server::infra::aws::{AwsStorageConfig, S3Storage};
 use nx_cache_server::server::run_server;
 
@@ -16,13 +16,11 @@ struct AwsCli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
-
+    let telemetry = nx_cache_server::telemetry::Telemetry::init()?;
     let cli = AwsCli::parse();
 
     // Validate server configuration
-    if let Err(e) = cli.server.validate().await {
+    if let Err(e) = cli.server.validate() {
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -50,11 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Server starting on {}",
         std::net::SocketAddr::new(cli.server.bind_address, cli.server.port)
     );
-    if let Err(e) = run_server(storage, &cli.server).await {
-        eprintln!();
-        eprintln!("Server error: {}", e);
-        std::process::exit(1);
-    }
+    let result = run_server(storage, &cli.server).await;
+    tokio::task::spawn_blocking(move || telemetry.shutdown()).await?;
+    result?;
 
     Ok(())
 }

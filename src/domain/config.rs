@@ -106,10 +106,6 @@ impl fmt::Display for ConfigError {
     }
 }
 
-pub trait ConfigValidator {
-    fn validate(&self) -> impl std::future::Future<Output = Result<(), ConfigError>>;
-}
-
 #[derive(Parser, Debug, Clone)]
 pub struct ServerConfig {
     #[arg(long, env = "PORT", default_value = "3000", help = "HTTP server port")]
@@ -139,10 +135,13 @@ pub struct ServerConfig {
 
     #[arg(long, env = "DEBUG", help = "Enable debug logging")]
     pub debug: bool,
+
+    #[arg(long, env = "MAX_UPLOAD_BYTES", default_value = "268435456")]
+    pub max_upload_bytes: u64,
 }
 
-impl ConfigValidator for ServerConfig {
-    async fn validate(&self) -> Result<(), ConfigError> {
+impl ServerConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.service_access_token.is_empty() {
             return Err(ConfigError::MissingField("SERVICE_ACCESS_TOKEN"));
         }
@@ -162,6 +161,11 @@ impl ConfigValidator for ServerConfig {
 
         if self.port == 0 {
             return Err(ConfigError::Invalid("port must be greater than 0"));
+        }
+        if self.max_upload_bytes == 0 || self.max_upload_bytes > 5 * 1024 * 1024 * 1024 {
+            return Err(ConfigError::Invalid(
+                "MAX_UPLOAD_BYTES must be between 1 byte and 5 GiB",
+            ));
         }
 
         Ok(())

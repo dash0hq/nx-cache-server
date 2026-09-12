@@ -39,7 +39,8 @@ pub fn create_router<T: StorageProvider + Clone>(app_state: &AppState<T>) -> Rou
         .route_layer(from_fn_with_state(
             app_state.clone(),
             middleware::auth_middleware::<T>,
-        ));
+        ))
+        .route_layer(axum::middleware::from_fn(middleware::trace_request));
 
     // Combine public and protected routes
     Router::new()
@@ -61,9 +62,23 @@ pub async fn run_server<T: StorageProvider + Clone>(
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!("Server running on {}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("SIGTERM handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]
@@ -80,7 +95,6 @@ mod tests {
         io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
         sync::RwLock,
     };
-    use tokio_util::io::ReaderStream;
     use tower::ServiceExt;
 
     #[derive(Clone)]
@@ -96,14 +110,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageProvider for AbsentStorage {
-        async fn exists(&self, _hash: &str) -> Result<bool, StorageError> {
-            Ok(false)
-        }
-
         async fn store(
             &self,
             _hash: &str,
-            _data: ReaderStream<impl AsyncRead + Send + Unpin>,
+            _path: &std::path::Path,
+            _length: u64,
         ) -> Result<(), StorageError> {
             Ok(())
         }
@@ -118,16 +129,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageProvider for PresentStorage {
-        async fn exists(&self, _hash: &str) -> Result<bool, StorageError> {
-            Ok(true)
-        }
-
         async fn store(
             &self,
             _hash: &str,
-            _data: ReaderStream<impl AsyncRead + Send + Unpin>,
+            _path: &std::path::Path,
+            _length: u64,
         ) -> Result<(), StorageError> {
-            panic!("a collision must not reach storage")
+            Err(StorageError::AlreadyExists)
         }
 
         async fn retrieve(
@@ -140,20 +148,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StorageProvider for MemoryStorage {
-        async fn exists(&self, hash: &str) -> Result<bool, StorageError> {
-            Ok(self.entries.read().await.contains_key(hash))
-        }
-
         async fn store(
             &self,
             hash: &str,
-            mut data: ReaderStream<impl AsyncRead + Send + Unpin>,
+            path: &std::path::Path,
+            _length: u64,
         ) -> Result<(), StorageError> {
-            let mut bytes = Vec::new();
-            while let Some(chunk) = data.next().await {
-                bytes.extend_from_slice(&chunk.map_err(|_| StorageError::OperationFailed)?);
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|_| StorageError::OperationFailed)?;
+            let mut entries = self.entries.write().await;
+            if entries.contains_key(hash) {
+                return Err(StorageError::AlreadyExists);
             }
-            self.entries.write().await.insert(hash.to_owned(), bytes);
+            entries.insert(hash.to_owned(), bytes);
             Ok(())
         }
 
@@ -179,6 +187,7 @@ mod tests {
             service_access_token: "read-write-token".to_string(),
             read_only_access_token: Some("read-only-token".to_string()),
             debug: false,
+            max_upload_bytes: 256 * 1024 * 1024,
         }
     }
 
@@ -215,6 +224,28 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(storage.entries.read().await["deadbeef"], artifact);
+    }
+
+    #[tokio::test]
+    async fn oversized_upload_is_rejected() {
+        let storage = MemoryStorage::default();
+        let mut config = test_config();
+        config.max_upload_bytes = 3;
+        let state = AppState {
+            storage: Arc::new(storage.clone()),
+            config: Arc::new(config),
+        };
+        let app = create_router(&state).with_state(state);
+        let response = app
+            .oneshot(authorized_request(
+                "PUT",
+                "/v1/cache/large",
+                Body::from("four"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(storage.entries.read().await.is_empty());
     }
 
     #[tokio::test]
