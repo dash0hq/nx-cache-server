@@ -10,17 +10,10 @@ auth:
 s3:
   bucket: render-test-cache
   region: eu-west-1
-  endpoint: https://s3.example.test
   timeoutSeconds: 47
-  credentialsSecret:
-    name: aws-credentials
-    accessKeyIdKey: access-id
-    secretAccessKeyKey: secret-key
-    sessionTokenKey: session-token
 serviceAccount:
   name: cache-identity
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/example
+  roleArn: arn:aws:iam::123456789012:role/ci/nx-cache
 podAnnotations:
   example.test/rollout: "2"
 terminationGracePeriodSeconds: 120

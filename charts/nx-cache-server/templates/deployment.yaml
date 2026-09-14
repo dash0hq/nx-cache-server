@@ -19,7 +19,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "nx-cache-server.serviceAccountName" . | quote }}
-      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
@@ -67,37 +67,10 @@ spec:
             {{- end }}
             - name: S3_BUCKET_NAME
               value: {{ required "s3.bucket is required" .Values.s3.bucket | quote }}
-            {{- with .Values.s3.region }}
             - name: AWS_REGION
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.s3.endpoint }}
-            - name: S3_ENDPOINT_URL
-              value: {{ . | quote }}
-            {{- end }}
+              value: {{ required "s3.region is required" .Values.s3.region | quote }}
             - name: S3_TIMEOUT
               value: {{ .Values.s3.timeoutSeconds | int64 | toString | quote }}
-            {{- with .Values.s3.credentialsSecret }}
-            {{- if .name }}
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .name | quote }}
-                  key: {{ .accessKeyIdKey | quote }}
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .name | quote }}
-                  key: {{ .secretAccessKeyKey | quote }}
-            {{- if .sessionTokenKey }}
-            - name: AWS_SESSION_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .name | quote }}
-                  key: {{ .sessionTokenKey | quote }}
-            {{- end }}
-            {{- end }}
-            {{- end }}
             - name: MAX_UPLOAD_BYTES
               value: {{ .Values.maxUploadBytes | int64 | toString | quote }}
             {{- if .Values.otlp.endpoint }}

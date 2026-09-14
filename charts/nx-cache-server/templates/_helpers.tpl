@@ -11,9 +11,5 @@ app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end }}
 
 {{- define "nx-cache-server.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create -}}
 {{- default .Release.Name .Values.serviceAccount.name -}}
-{{- else -}}
-{{- required "serviceAccount.name is required when serviceAccount.create is false" .Values.serviceAccount.name -}}
-{{- end -}}
 {{- end }}

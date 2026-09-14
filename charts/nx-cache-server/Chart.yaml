@@ -1,6 +1,6 @@
 apiVersion: v2
 name: nx-cache-server
-description: Nx remote cache backed by externally managed S3-compatible storage
+description: Nx remote cache on EKS backed by AWS S3 with IRSA
 type: application
 version: 0.1.0
 appVersion: "b73a7d8dcf2291deb4922f70417e87a34c14ea97"

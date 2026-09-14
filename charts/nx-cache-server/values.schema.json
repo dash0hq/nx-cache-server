@@ -33,37 +33,26 @@
     "s3": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["bucket", "region", "endpoint", "timeoutSeconds", "credentialsSecret"],
+      "required": ["bucket", "region", "timeoutSeconds"],
       "properties": {
         "bucket": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
-        "region": {"type": "string"},
-        "endpoint": {"$ref": "#/definitions/endpoint"},
-        "timeoutSeconds": {"type": "integer", "minimum": 1},
-        "credentialsSecret": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["name", "accessKeyIdKey", "secretAccessKeyKey", "sessionTokenKey"],
-          "properties": {
-            "name": {"$ref": "#/definitions/optionalName"},
-            "accessKeyIdKey": {"$ref": "#/definitions/secretKey"},
-            "secretAccessKeyKey": {"$ref": "#/definitions/secretKey"},
-            "sessionTokenKey": {"type": "string", "pattern": "^[a-zA-Z0-9._-]*$"}
-          }
-        }
+        "region": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
+        "timeoutSeconds": {"type": "integer", "minimum": 1}
       }
     },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["create", "name", "annotations", "automountServiceAccountToken"],
+      "required": ["name", "roleArn"],
       "properties": {
-        "create": {"type": "boolean"},
         "name": {"$ref": "#/definitions/optionalName"},
-        "annotations": {"$ref": "#/definitions/stringMap"},
-        "automountServiceAccountToken": {"type": "boolean"}
-      },
-      "if": {"properties": {"create": {"const": false}}},
-      "then": {"properties": {"name": {"minLength": 1}}}
+        "roleArn": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IAM role ARN, including optional IAM paths and AWS partitions.",
+          "pattern": "^arn:aws(-[a-z0-9]+)*:iam::[0-9]{12}:role/([!-~]+/)?[A-Za-z0-9_+=,.@-]{1,64}$"
+        }
+      }
     },
     "podAnnotations": {"$ref": "#/definitions/stringMap"},
     "terminationGracePeriodSeconds": {"type": "integer", "minimum": 1},
@@ -73,7 +62,7 @@
       "additionalProperties": false,
       "required": ["sizeLimit"],
       "properties": {
-        "sizeLimit": {"type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$"}
+        "sizeLimit": {"type": "string", "minLength": 1}
       }
     },
     "resources": {
@@ -115,7 +104,7 @@
       "type": "object",
       "additionalProperties": {
         "oneOf": [
-          {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+|[numkMGTPE]|[KMGTPE]i)?$"},
+          {"type": "string"},
           {"type": "number", "minimum": 0}
         ]
       }

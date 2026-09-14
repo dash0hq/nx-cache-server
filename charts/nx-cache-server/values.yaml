@@ -21,20 +21,12 @@ auth:
 
 s3:
   bucket: "" # Required. The chart does not create the bucket.
-  region: "" # Set explicitly unless the AWS region provider can discover it.
-  endpoint: "" # Optional http(s) endpoint; enables path-style S3 addressing.
+  region: "" # Required AWS region for the bucket.
   timeoutSeconds: 30
-  credentialsSecret:
-    name: "" # Omit to use the AWS credential provider chain.
-    accessKeyIdKey: AWS_ACCESS_KEY_ID
-    secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
-    sessionTokenKey: "" # Set when the Secret contains temporary credentials.
 
 serviceAccount:
-  create: true
-  name: "" # Defaults to the release name; required when create is false.
-  annotations: {} # Provider-specific workload identity annotations.
-  automountServiceAccountToken: false
+  name: "" # Defaults to the release name. Must match the IAM trust policy.
+  roleArn: "" # Required existing IAM role for EKS IRSA.
 
 podAnnotations: {}
 terminationGracePeriodSeconds: 60

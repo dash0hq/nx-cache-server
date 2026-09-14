@@ -31,8 +31,8 @@ Access to AWS S3 (or S3-compatible service like MinIO)
 ### Installation
 
 For Kubernetes, use the [first-party Helm chart](charts/nx-cache-server/README.md).
-It uses externally managed S3 storage and Secrets, with workload identity options
-and a ClusterIP Service. Install it from a checkout; the chart is not
+It targets EKS with IRSA, externally managed AWS S3 and Secrets, and a ClusterIP
+Service. Install it from a checkout; the chart is not
 published to a Helm repository yet.
 
 #### Step 1: Pull the image

@@ -1,8 +1,10 @@
 # Nx cache server Helm chart
 
 This chart installs a Deployment, a ClusterIP Service on port 3000, and a
-ServiceAccount. S3 storage, IAM, Secrets and external routing are managed outside
-the chart. There are no Ingress resources or chart dependencies.
+ServiceAccount on EKS. It supports AWS S3 with IAM roles for service accounts
+(IRSA). The bucket, IAM role and trust policy, cluster OIDC setup, Secrets and
+external routing are managed outside the chart. There are no Ingress resources
+or chart dependencies.
 
 ## Install from a checkout
 
@@ -14,14 +16,14 @@ or OCI chart publication in this initial version.
 
 Before installing:
 
-1. Create an S3 bucket and grant the server identity `s3:GetObject` and
-   `s3:PutObject` for its objects. S3-compatible storage must support conditional
-   `PutObject` with `If-None-Match: *`. Configure encryption permissions, lifecycle
-   expiration and network access as required by your storage provider.
+1. Create an AWS S3 bucket and grant the IRSA role `s3:GetObject` and
+   `s3:PutObject` for its objects. Configure encryption permissions, lifecycle
+   expiration and network access as required by your bucket configuration.
 2. Create a namespace and an existing Secret containing a strong read-write
    token. Optionally add a distinct read-only token. Give only the read-only
    token to untrusted builds. The application rejects empty or identical tokens.
-3. Arrange AWS credentials or a supported workload identity, as described below.
+3. Configure the cluster OIDC provider and IAM role trust for the release namespace
+   and ServiceAccount name, as described below.
 
 For example, provision a token Secret from files without putting token values in
 Helm values or shell history. The files must contain the exact tokens without a
@@ -40,6 +42,9 @@ Create `cache-values.yaml` with your non-secret configuration:
 s3:
   bucket: your-existing-cache-bucket
   region: eu-west-1
+serviceAccount:
+  name: nx-cache
+  roleArn: arn:aws:iam::123456789012:role/ci/nx-cache
 auth:
   readWriteSecret:
     name: cache-auth
@@ -49,7 +54,7 @@ auth:
     key: read-only
 ```
 
-With workload identity configured for the server's ServiceAccount, run from the
+With IRSA trust configured for the server's ServiceAccount, run from the
 repository root:
 
 ```sh
@@ -58,61 +63,55 @@ helm upgrade --install nx-cache charts/nx-cache-server \
   --namespace nx-cache -f cache-values.yaml --wait --timeout 5m
 ```
 
-An unconfigured install intentionally fails validation. `s3.bucket` and
-`auth.readWriteSecret.name` are required. Helm checks the values, not the existence
-or contents of referenced Secrets. All Secrets and existing ServiceAccounts must
-be in the release namespace. Missing Secret keys prevent the container starting.
+An unconfigured install intentionally fails validation. `s3.bucket`, `s3.region`,
+`serviceAccount.roleArn` and `auth.readWriteSecret.name` are required. Helm checks
+the values, not IAM trust or the existence and contents of referenced Secrets.
+All Secrets must be in the release namespace. Missing Secret keys prevent the
+container starting.
 
 Clients inside the cluster can use `http://nx-cache.nx-cache.svc:3000` as
 `NX_SELF_HOSTED_REMOTE_CACHE_SERVER`. Set
 `NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN` to the appropriate token. Use TLS at
 an external router or trusted proxy for traffic outside the cluster.
 
-## Credentials and workload identity
+## IRSA and client authentication
 
 **Client authentication and storage identity are separate.** Nx clients use the
-read-write or read-only bearer token to access this server. The server uses AWS
-credentials to access S3. Linking the server's ServiceAccount to a cloud identity
-can replace static AWS keys; it does not replace the Nx client tokens. The
+read-write or read-only bearer token to access this server. The server uses IRSA
+to obtain short-lived AWS credentials for S3. IRSA does not replace the Nx client tokens. The
 application does not validate cloud identity tokens as client authentication.
 
-`s3.credentialsSecret.name` defaults to empty, so the application uses its AWS SDK
-default credential provider chain. The compiled SDK includes web-identity and
-container credential providers:
+The chart always creates the ServiceAccount and annotates it with
+`eks.amazonaws.com/role-arn` from the required `serviceAccount.roleArn` value.
+`serviceAccount.name` defaults to the Helm release name; set it explicitly to keep
+the IAM trust binding stable. There is no existing-account mode.
 
-- [EKS IRSA](https://docs.aws.amazon.com/eks/latest/userguide/pod-configuration.html)
-  requires IAM trust, S3 permissions and the cluster injector to supply
-  `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE` and a readable projected token.
-- [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-how-it-works.html)
-  requires an external ServiceAccount association and the Pod Identity Agent;
-  EKS supplies the credential endpoint and projected token. It is not configured
-  merely by adding an IRSA annotation.
-- [GKE's Google ServiceAccount linking](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity)
-  supplies credentials for Google Cloud APIs, not AWS S3 credentials. That linking
-  alone is not sufficient for this AWS SDK-based server.
+Configure the IAM role outside Helm to trust the EKS cluster's OIDC provider with
+`sts:AssumeRoleWithWebIdentity`. The trust conditions must match:
 
-The chart does not provision IAM trust, provider associations or projected identity
-volumes. Those belong to the cluster's identity integration. Provider-specific
-identity behavior has not been verified by the local chart tests.
+- `sub`: `system:serviceaccount:<release-namespace>:<serviceAccount-name>`
+- `aud`: `sts.amazonaws.com`
 
-Use `serviceAccount.annotations` for an account created by this chart. To use an
-externally managed account, set `serviceAccount.create: false` and
-`serviceAccount.name`; configure annotations on that existing account yourself.
-The chart does not create RBAC or grant access to the Kubernetes API.
-`serviceAccount.automountServiceAccountToken` defaults to false. Enable it only
-if your identity integration requires the standard Kubernetes API token mount;
-provider-injected audience-specific tokens may use separate projected volumes.
+For the example above, the subject is `system:serviceaccount:nx-cache:nx-cache`.
+Changing either the release namespace or the ServiceAccount name requires updating
+the role's trust policy. Restrict trust to the intended namespace and account, and
+grant the role only the required bucket permissions. Follow the
+[AWS IRSA setup guide](https://docs.aws.amazon.com/eks/latest/userguide/associate-service-account-role.html)
+for the cluster OIDC provider and trust policy configuration.
 
-If workload identity is unavailable, `s3.credentialsSecret.name` can reference an
-existing Secret with `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` keys. Override
-`accessKeyIdKey` and `secretAccessKeyKey` when the Secret uses other key names.
-For temporary credentials, also set `sessionTokenKey` to its session token key.
-Static keys take precedence over workload identity, so omit this Secret when
-using automatic credential discovery. Credential values never belong in Helm values.
+The EKS IRSA webhook supplies `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE` and a
+readable projected token. The application still uses the AWS SDK default
+credential chain, including its web-identity provider; it is not an IRSA-only
+credential resolver. IRSA is the supported chart configuration, and the chart
+does not inject static AWS keys or custom S3 endpoints. The explicit `s3.region`
+selects the bucket's AWS region.
 
-Set `s3.region` explicitly unless your environment supplies region discovery.
-For MinIO or another S3-compatible provider, set `s3.endpoint` to an HTTP or HTTPS
-URL. The application uses path-style addressing for custom endpoints.
+Ordinary Kubernetes API-token automount is disabled on both the ServiceAccount
+and pod. This does not prohibit the IRSA webhook's separate projected token
+volume. The chart grants no Kubernetes API access and does not create IAM roles,
+trust policies or cluster OIDC providers. Local rendering and Kubernetes admission
+checks do not prove that IRSA can assume the role; verify authenticated S3 access
+on the target EKS cluster before sending CI traffic.
 
 ## Storage, limits and shutdown
 
@@ -131,6 +130,11 @@ ephemeral-storage request and a 2 GiB limit per pod. They are starting values,
 not a concurrency guarantee. Kubernetes enforces local storage limits through
 accounting and eviction, not a strict reservation for each upload. Disk pressure
 can fail uploads or evict the pod before all clients finish.
+
+Helm checks resource quantity types and that `spool.sizeLimit` is a nonempty
+string. Kubernetes validates quantity syntax and resource constraints, including
+malformed quantity strings that Helm accepts. Use Kubernetes quantities such as
+`100m`, `128Mi` and `1Gi`; size the spool and resource budgets together.
 
 Both probes call the public `/health` route. It returns `OK` when the HTTP server
 is running; **it does not test S3 credentials, permissions or connectivity**.
@@ -171,11 +175,12 @@ helm upgrade nx-cache charts/nx-cache-server \
 helm uninstall nx-cache --namespace nx-cache
 ```
 
-Secret values enter the container through environment variables. Updating an
-external Secret does not restart pods; perform a rollout after token, credential
+Client tokens and OTLP headers enter the container through environment variables.
+Updating an external Secret does not restart pods; perform a rollout after token
 or OTLP header rotation. A changed `podAnnotations` value can trigger that rollout
-through Helm. Uninstalling leaves external Secrets, existing ServiceAccounts,
-the S3 bucket and objects untouched.
+through Helm. Use a rollout after changing `serviceAccount.roleArn` too, so the
+IRSA webhook reinjects the role configuration. Uninstalling removes the chart's
+ServiceAccount but leaves external Secrets, the IAM role/trust and S3 objects untouched.
 
 ## Local validation
 
@@ -183,7 +188,8 @@ From the repository root, with Helm on `PATH`:
 
 ```sh
 helm lint charts/nx-cache-server --strict \
-  --set s3.bucket=test-cache,auth.readWriteSecret.name=test-auth
+  --set s3.bucket=test-cache,s3.region=eu-west-1,auth.readWriteSecret.name=test-auth \
+  --set serviceAccount.roleArn=arn:aws:iam::123456789012:role/ci/nx-cache
 helm lint charts/nx-cache-server --strict \
   -f charts/nx-cache-server/tests/optional-values.yaml
 helm template cache charts/nx-cache-server \
@@ -192,7 +198,9 @@ helm template cache charts/nx-cache-server \
 
 `values.schema.json` validates values during linting, rendering and installation.
 An unconfigured `helm template cache charts/nx-cache-server` must fail with missing
-bucket and read-write Secret name diagnostics. Inspect the rendered resources when
-changing templates, including their Secret references, security settings and spool.
+bucket, region, role ARN and read-write Secret name diagnostics. Inspect the
+rendered resources when changing templates, including their IRSA annotation,
+Secret references, security settings and spool. Use a Kubernetes server-side dry
+run to validate quantities; Helm intentionally does not parse their grammar.
 `tests/optional-values.yaml` exercises optional configuration for local rendering;
 it is not a deployable environment and is excluded from packaged charts.
