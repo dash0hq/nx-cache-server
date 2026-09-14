@@ -30,6 +30,11 @@ Access to AWS S3 (or S3-compatible service like MinIO)
 
 ### Installation
 
+For Kubernetes, use the [first-party Helm chart](charts/nx-cache-server/README.md).
+It uses externally managed S3 storage and Secrets, with optional ingress and
+workload identity configuration. Install it from a checkout; the chart is not
+published to a Helm repository yet.
+
 #### Step 1: Pull the image
 
 ```bash

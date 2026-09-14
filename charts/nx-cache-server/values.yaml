@@ -1,0 +1,68 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/dash0hq/nx-cache-server
+  # Published image for appVersion. Change the digest to upgrade the application.
+  digest: sha256:6bd3cddafeb34345d0274a9aa275c64587d09b48d345fd107e4f56114927c980
+  pullPolicy: IfNotPresent
+
+# The default published image supports Linux/amd64 only.
+nodeSelector:
+  kubernetes.io/os: linux
+  kubernetes.io/arch: amd64
+
+auth:
+  readWriteSecret:
+    name: "" # Required existing Secret in the release namespace.
+    key: token
+  readOnlySecret:
+    name: "" # Optional. The token must differ from the read-write token.
+    key: token
+
+s3:
+  bucket: "" # Required. The chart does not create the bucket.
+  region: "" # Set explicitly unless the AWS region provider can discover it.
+  endpoint: "" # Optional http(s) endpoint; enables path-style S3 addressing.
+  timeoutSeconds: 30
+  credentialsSecret:
+    name: "" # Omit to use the AWS credential provider chain.
+    accessKeyIdKey: AWS_ACCESS_KEY_ID
+    secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
+    sessionTokenKey: "" # Set when the Secret contains temporary credentials.
+
+serviceAccount:
+  create: true
+  name: "" # Defaults to the release name; required when create is false.
+  annotations: {} # Provider-specific workload identity annotations.
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+terminationGracePeriodSeconds: 60
+maxUploadBytes: 268435456 # 256 MiB per request, NOT a pod-wide bound.
+
+spool:
+  sizeLimit: 1Gi # Disk-backed emptyDir. Budget for concurrent uploads.
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+    ephemeral-storage: 1Gi
+  limits:
+    memory: 512Mi
+    ephemeral-storage: 2Gi
+
+otlp:
+  endpoint: "" # Base OTLP HTTP endpoint; empty disables tracing.
+  serviceName: nx-cache-server
+  headersSecret:
+    name: ""
+    key: headers
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: "" # Required when enabled. Routes / to the ClusterIP Service on 3000.
+  tls:
+    secretName: "" # Optional existing TLS Secret for ingress.host.

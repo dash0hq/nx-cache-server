@@ -1,0 +1,52 @@
+# Render-only fixtures. These are Secret names and keys, never credentials.
+replicaCount: 3
+auth:
+  readWriteSecret:
+    name: cache-tokens
+    key: rw
+  readOnlySecret:
+    name: cache-tokens
+    key: ro
+s3:
+  bucket: render-test-cache
+  region: eu-west-1
+  endpoint: https://s3.example.test
+  timeoutSeconds: 47
+  credentialsSecret:
+    name: aws-credentials
+    accessKeyIdKey: access-id
+    secretAccessKeyKey: secret-key
+    sessionTokenKey: session-token
+serviceAccount:
+  name: cache-identity
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/example
+podAnnotations:
+  example.test/rollout: "2"
+terminationGracePeriodSeconds: 120
+maxUploadBytes: 5368709120
+spool:
+  sizeLimit: 16Gi
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+    ephemeral-storage: 16Gi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+    ephemeral-storage: 20Gi
+otlp:
+  endpoint: https://otel.example.test:4318
+  serviceName: cache-render-test
+  headersSecret:
+    name: otlp-auth
+    key: exporter-headers
+ingress:
+  enabled: true
+  className: example
+  annotations:
+    example.test/body-size: "5g"
+  host: cache.example.test
+  tls:
+    secretName: cache-tls

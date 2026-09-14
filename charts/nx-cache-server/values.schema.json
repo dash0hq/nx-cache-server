@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "nodeSelector", "auth", "s3", "serviceAccount", "podAnnotations", "terminationGracePeriodSeconds", "maxUploadBytes", "spool", "resources", "otlp", "ingress"],
+  "properties": {
+    "replicaCount": {"type": "integer", "minimum": 1},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1, "pattern": "^[^\\s@]+$"},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "nodeSelector": {"$ref": "#/definitions/stringMap"},
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readWriteSecret", "readOnlySecret"],
+      "properties": {
+        "readWriteSecret": {
+          "allOf": [
+            {"$ref": "#/definitions/secretRef"},
+            {"properties": {"name": {"minLength": 1}}}
+          ]
+        },
+        "readOnlySecret": {"$ref": "#/definitions/secretRef"}
+      }
+    },
+    "s3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bucket", "region", "endpoint", "timeoutSeconds", "credentialsSecret"],
+      "properties": {
+        "bucket": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
+        "region": {"type": "string"},
+        "endpoint": {"$ref": "#/definitions/endpoint"},
+        "timeoutSeconds": {"type": "integer", "minimum": 1},
+        "credentialsSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "accessKeyIdKey", "secretAccessKeyKey", "sessionTokenKey"],
+          "properties": {
+            "name": {"$ref": "#/definitions/optionalName"},
+            "accessKeyIdKey": {"$ref": "#/definitions/secretKey"},
+            "secretAccessKeyKey": {"$ref": "#/definitions/secretKey"},
+            "sessionTokenKey": {"type": "string", "pattern": "^[a-zA-Z0-9._-]*$"}
+          }
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name", "annotations", "automountServiceAccountToken"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"$ref": "#/definitions/optionalName"},
+        "annotations": {"$ref": "#/definitions/stringMap"},
+        "automountServiceAccountToken": {"type": "boolean"}
+      },
+      "if": {"properties": {"create": {"const": false}}},
+      "then": {"properties": {"name": {"minLength": 1}}}
+    },
+    "podAnnotations": {"$ref": "#/definitions/stringMap"},
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 1},
+    "maxUploadBytes": {"type": "integer", "minimum": 1, "maximum": 5368709120},
+    "spool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizeLimit"],
+      "properties": {
+        "sizeLimit": {"type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {"$ref": "#/definitions/quantities"},
+        "limits": {"$ref": "#/definitions/quantities"}
+      }
+    },
+    "otlp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "serviceName", "headersSecret"],
+      "properties": {
+        "endpoint": {"$ref": "#/definitions/endpoint"},
+        "serviceName": {"type": "string", "minLength": 1},
+        "headersSecret": {"$ref": "#/definitions/secretRef"}
+      },
+      "if": {"properties": {"headersSecret": {"properties": {"name": {"minLength": 1}}}}},
+      "then": {"properties": {"endpoint": {"minLength": 1}}}
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "className", "annotations", "host", "tls"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "className": {"$ref": "#/definitions/optionalName"},
+        "annotations": {"$ref": "#/definitions/stringMap"},
+        "host": {"$ref": "#/definitions/optionalName"},
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretName"],
+          "properties": {"secretName": {"$ref": "#/definitions/optionalName"}}
+        }
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {"host": {"minLength": 1}}}
+    }
+  },
+  "definitions": {
+    "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "optionalName": {"type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"},
+    "secretKey": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-zA-Z0-9._-]+$"},
+    "secretRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "key"],
+      "properties": {
+        "name": {"$ref": "#/definitions/optionalName"},
+        "key": {"$ref": "#/definitions/secretKey"}
+      }
+    },
+    "endpoint": {"type": "string", "pattern": "^$|^https?://[^/\\s]+[^\\s]*$"},
+    "quantities": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+|[numkMGTPE]|[KMGTPE]i)?$"},
+          {"type": "number", "minimum": 0}
+        ]
+      }
+    }
+  }
+}
