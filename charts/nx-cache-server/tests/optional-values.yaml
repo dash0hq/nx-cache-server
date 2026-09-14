@@ -42,11 +42,3 @@ otlp:
   headersSecret:
     name: otlp-auth
     key: exporter-headers
-ingress:
-  enabled: true
-  className: example
-  annotations:
-    example.test/body-size: "5g"
-  host: cache.example.test
-  tls:
-    secretName: cache-tls

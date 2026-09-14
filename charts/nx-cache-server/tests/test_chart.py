@@ -19,8 +19,8 @@ def helm(*args):
 
 
 class ChartTest(unittest.TestCase):
-    def render(self, *args):
-        result = helm("template", "cache", CHART, *BASE, *args)
+    def render(self, *args, release="cache"):
+        result = helm("template", release, CHART, *BASE, *args)
         self.assertEqual(result.returncode, 0, result.stderr)
         docs = list(yaml.safe_load_all(result.stdout))
         self.assertTrue(all(docs))
@@ -38,6 +38,17 @@ class ChartTest(unittest.TestCase):
             with self.subTest(values=values):
                 result = helm("lint", CHART, "--strict", *values)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_boolean_like_names_remain_strings(self):
+        docs = self.render("--set-string", "serviceAccount.name=off",
+                           release="on")
+        for kind, doc in docs.items():
+            self.assertEqual(doc["metadata"]["name"], "off" if kind == "ServiceAccount" else "on")
+            self.assertEqual(doc["metadata"]["labels"]["app.kubernetes.io/instance"], "on")
+        dep = docs["Deployment"]["spec"]
+        self.assertEqual(dep["template"]["spec"]["serviceAccountName"], "off")
+        self.assertEqual(dep["selector"]["matchLabels"]["app.kubernetes.io/instance"], "on")
+        self.assertEqual(docs["Service"]["spec"]["selector"], dep["selector"]["matchLabels"])
 
     def test_defaults(self):
         docs = self.render()
@@ -80,6 +91,7 @@ class ChartTest(unittest.TestCase):
     def test_optional_configuration(self):
         # --set overrides -f, so explicitly override the required BASE values too.
         docs = self.render(*OPTIONAL, "--set", "s3.bucket=render-test-cache,auth.readWriteSecret.name=cache-tokens")
+        self.assertEqual(set(docs), {"Deployment", "Service", "ServiceAccount"})
         pod = docs["Deployment"]["spec"]["template"]["spec"]
         env = self.env(docs)
         self.assertEqual(docs["Deployment"]["spec"]["replicas"], 3)
@@ -107,21 +119,13 @@ class ChartTest(unittest.TestCase):
         self.assertEqual(pod["terminationGracePeriodSeconds"], 120)
         self.assertEqual(pod["volumes"][0]["emptyDir"], {"sizeLimit": "16Gi"})
         self.assertEqual(pod["containers"][0]["resources"]["limits"]["ephemeral-storage"], "20Gi")
-        ingress = docs["Ingress"]["spec"]
-        self.assertEqual(ingress["ingressClassName"], "example")
-        self.assertEqual(ingress["tls"], [{"hosts": ["cache.example.test"], "secretName": "cache-tls"}])
-        self.assertEqual(ingress["rules"], [{"host": "cache.example.test", "http": {"paths": [{
-            "path": "/", "pathType": "Prefix", "backend": {"service": {"name": "cache", "port": {"name": "http"}}},
-        }]}}])
 
-    def test_existing_identity_and_plain_ingress(self):
-        docs = self.render("--set", "serviceAccount.create=false,serviceAccount.name=existing,serviceAccount.automountServiceAccountToken=true,ingress.enabled=true,ingress.host=cache.example.test")
+    def test_existing_identity(self):
+        docs = self.render("--set", "serviceAccount.create=false,serviceAccount.name=existing,serviceAccount.automountServiceAccountToken=true")
         self.assertNotIn("ServiceAccount", docs)
         pod = docs["Deployment"]["spec"]["template"]["spec"]
         self.assertEqual(pod["serviceAccountName"], "existing")
         self.assertTrue(pod["automountServiceAccountToken"])
-        self.assertNotIn("tls", docs["Ingress"]["spec"])
-        self.assertNotIn("ingressClassName", docs["Ingress"]["spec"])
 
     def test_credentials_without_session_token_and_otlp_without_headers(self):
         docs = self.render("--set", "s3.credentialsSecret.name=aws,otlp.endpoint=http://collector:4318")
@@ -141,7 +145,7 @@ class ChartTest(unittest.TestCase):
             ("auth.readWriteSecret.name=", "auth.readWriteSecret.name"),
             ("auth.readWriteSecret.key=", "auth.readWriteSecret.key"),
             ("serviceAccount.create=false", "serviceAccount.name"),
-            ("ingress.enabled=true", "ingress.host"),
+            ("ingress.enabled=true", "ingress"),
             ("otlp.headersSecret.name=headers", "otlp.endpoint"),
             ("s3.credentialsSecret.secretAccessKeyKey=", "secretAccessKeyKey"),
             ("maxUploadBytes=0", "maxUploadBytes"),

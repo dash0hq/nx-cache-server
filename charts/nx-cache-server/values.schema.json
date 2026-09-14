@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "image", "nodeSelector", "auth", "s3", "serviceAccount", "podAnnotations", "terminationGracePeriodSeconds", "maxUploadBytes", "spool", "resources", "otlp", "ingress"],
+  "required": ["replicaCount", "image", "nodeSelector", "auth", "s3", "serviceAccount", "podAnnotations", "terminationGracePeriodSeconds", "maxUploadBytes", "spool", "resources", "otlp"],
   "properties": {
     "replicaCount": {"type": "integer", "minimum": 1},
     "image": {
@@ -95,25 +95,6 @@
       },
       "if": {"properties": {"headersSecret": {"properties": {"name": {"minLength": 1}}}}},
       "then": {"properties": {"endpoint": {"minLength": 1}}}
-    },
-    "ingress": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled", "className", "annotations", "host", "tls"],
-      "properties": {
-        "enabled": {"type": "boolean"},
-        "className": {"$ref": "#/definitions/optionalName"},
-        "annotations": {"$ref": "#/definitions/stringMap"},
-        "host": {"$ref": "#/definitions/optionalName"},
-        "tls": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["secretName"],
-          "properties": {"secretName": {"$ref": "#/definitions/optionalName"}}
-        }
-      },
-      "if": {"properties": {"enabled": {"const": true}}},
-      "then": {"properties": {"host": {"minLength": 1}}}
     }
   },
   "definitions": {

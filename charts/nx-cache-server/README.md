@@ -1,8 +1,8 @@
 # Nx cache server Helm chart
 
 This chart installs a Deployment, a ClusterIP Service on port 3000, and a
-ServiceAccount. Ingress is optional. S3 storage, IAM, Secrets and ingress
-controllers are managed outside the chart. There are no chart dependencies.
+ServiceAccount. S3 storage, IAM, Secrets and external routing are managed outside
+the chart. There are no Ingress resources or chart dependencies.
 
 ## Install from a checkout
 
@@ -40,8 +40,6 @@ Create `cache-values.yaml` with your non-secret configuration:
 s3:
   bucket: your-existing-cache-bucket
   region: eu-west-1
-  credentialsSecret:
-    name: cache-aws # Omit when using workload identity.
 auth:
   readWriteSecret:
     name: cache-auth
@@ -51,7 +49,7 @@ auth:
     key: read-only
 ```
 
-With `cache-aws` provisioned or workload identity configured, run from the
+With workload identity configured for the server's ServiceAccount, run from the
 repository root:
 
 ```sh
@@ -68,23 +66,34 @@ be in the release namespace. Missing Secret keys prevent the container starting.
 Clients inside the cluster can use `http://nx-cache.nx-cache.svc:3000` as
 `NX_SELF_HOSTED_REMOTE_CACHE_SERVER`. Set
 `NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN` to the appropriate token. Use TLS at
-the ingress or another trusted proxy for traffic outside the cluster.
+an external router or trusted proxy for traffic outside the cluster.
 
 ## Credentials and workload identity
 
-For static AWS credentials, `s3.credentialsSecret.name` references a Secret with
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` keys by default. Override
-`accessKeyIdKey` and `secretAccessKeyKey` when your Secret uses other key names.
-For temporary credentials, also set `sessionTokenKey` to the Secret's session
-token key. Credential values never belong in Helm values.
+**Client authentication and storage identity are separate.** Nx clients use the
+read-write or read-only bearer token to access this server. The server uses AWS
+credentials to access S3. Linking the server's ServiceAccount to a cloud identity
+can replace static AWS keys; it does not replace the Nx client tokens. The
+application does not validate cloud identity tokens as client authentication.
 
-When the Secret name is empty, the application uses its AWS SDK credential
-provider chain. Workload identity needs the provider's cluster integration,
-identity trust policy and S3 permissions. For example, an IRSA setup must inject
-the role environment and projected web-identity token into the pod. Adding a
-ServiceAccount annotation alone does not establish that trust or install the
-injector. Provider-specific identity behavior is not verified by this chart's
-local tests.
+`s3.credentialsSecret.name` defaults to empty, so the application uses its AWS SDK
+default credential provider chain. The compiled SDK includes web-identity and
+container credential providers:
+
+- [EKS IRSA](https://docs.aws.amazon.com/eks/latest/userguide/pod-configuration.html)
+  requires IAM trust, S3 permissions and the cluster injector to supply
+  `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE` and a readable projected token.
+- [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-how-it-works.html)
+  requires an external ServiceAccount association and the Pod Identity Agent;
+  EKS supplies the credential endpoint and projected token. It is not configured
+  merely by adding an IRSA annotation.
+- [GKE's Google ServiceAccount linking](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity)
+  supplies credentials for Google Cloud APIs, not AWS S3 credentials. That linking
+  alone is not sufficient for this AWS SDK-based server.
+
+The chart does not provision IAM trust, provider associations or projected identity
+volumes. Those belong to the cluster's identity integration. Provider-specific
+identity behavior has not been verified by the local chart tests.
 
 Use `serviceAccount.annotations` for an account created by this chart. To use an
 externally managed account, set `serviceAccount.create: false` and
@@ -93,6 +102,13 @@ The chart does not create RBAC or grant access to the Kubernetes API.
 `serviceAccount.automountServiceAccountToken` defaults to false. Enable it only
 if your identity integration requires the standard Kubernetes API token mount;
 provider-injected audience-specific tokens may use separate projected volumes.
+
+If workload identity is unavailable, `s3.credentialsSecret.name` can reference an
+existing Secret with `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` keys. Override
+`accessKeyIdKey` and `secretAccessKeyKey` when the Secret uses other key names.
+For temporary credentials, also set `sessionTokenKey` to its session token key.
+Static keys take precedence over workload identity, so omit this Secret when
+using automatic credential discovery. Credential values never belong in Helm values.
 
 Set `s3.region` explicitly unless your environment supplies region discovery.
 For MinIO or another S3-compatible provider, set `s3.endpoint` to an HTTP or HTTPS
@@ -126,25 +142,13 @@ and telemetry flush time. Kubernetes can terminate remaining uploads after that
 deadline. `s3.timeoutSeconds` defaults to 30 and limits each S3 operation, not
 the time a client spends uploading to the server.
 
-## Optional ingress and tracing
+## External routing and optional tracing
 
-The ingress routes one hostname at `/`, without rewriting paths, to the Service:
-
-```yaml
-ingress:
-  enabled: true
-  className: your-installed-controller
-  host: cache.example.com
-  tls:
-    secretName: cache-tls
-```
-
-Create the TLS Secret and configure DNS separately. Ingress annotations, body
-size limits, request buffering and client/upstream timeouts depend on your
-controller. Set them to accommodate `maxUploadBytes` and the slowest expected
-transfer plus S3 time. The chart does not guess controller-specific annotations.
-Without a TLS Secret, TLS termination must be configured elsewhere. No ingress
-controller or certificate issuer is installed by this chart.
+Configure routing, DNS and TLS outside this chart when clients need access from
+outside the cluster. Route `/` without path rewriting to the ClusterIP Service
+on port 3000. Proxy body-size limits, request buffering and client/upstream timeouts
+depend on that routing infrastructure. Configure them to accommodate
+`maxUploadBytes` and the slowest expected transfer plus S3 time.
 
 Tracing is disabled unless `otlp.endpoint` is set. Use a base OTLP HTTP endpoint,
 such as `https://collector.example.com:4318`; the exporter adds `/v1/traces`.
@@ -152,7 +156,7 @@ such as `https://collector.example.com:4318`; the exporter adds `/v1/traces`.
 reference an existing Secret through `otlp.headersSecret.name` and `.key`.
 Its value uses the OTLP header format, for example
 `Authorization=Bearer%20your-token`. Do not put that value in Helm values or
-ingress annotations. This chart does not install a collector.
+proxy configuration. This chart does not install a collector.
 
 ## Upgrade and uninstall
 
@@ -185,5 +189,5 @@ uv run --with PyYAML python3 charts/nx-cache-server/tests/test_chart.py
 
 The test suite checks invalid values, exact environment strings and Secret
 references, hardened security, selectors, disk storage, existing ServiceAccounts,
-and optional ingress/TLS and tracing. `tests/optional-values.yaml` is a render
+and optional tracing. `tests/optional-values.yaml` is a render
 fixture, not a deployable environment. It is excluded from packaged charts.

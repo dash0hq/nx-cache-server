@@ -58,11 +58,3 @@ otlp:
   headersSecret:
     name: ""
     key: headers
-
-ingress:
-  enabled: false
-  className: ""
-  annotations: {}
-  host: "" # Required when enabled. Routes / to the ClusterIP Service on 3000.
-  tls:
-    secretName: "" # Optional existing TLS Secret for ingress.host.
