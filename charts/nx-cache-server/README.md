@@ -17,7 +17,10 @@ or OCI chart publication in this initial version.
 Before installing:
 
 1. Create an AWS S3 bucket and grant the IRSA role `s3:GetObject` and
-   `s3:PutObject` for its objects. Configure encryption permissions, lifecycle
+   `s3:PutObject` on its object ARNs, plus `s3:ListBucket` on the bucket ARN itself.
+   Without `s3:ListBucket`, [S3 returns 403 instead of 404 for missing keys](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html).
+   The server needs S3's `NoSuchKey` response to report a cache miss; it treats
+   access-denied responses as storage failures. Configure encryption permissions, lifecycle
    expiration and network access as required by your bucket configuration.
 2. Create a namespace and an existing Secret containing a strong read-write
    token. Optionally add a distinct read-only token. Give only the read-only
