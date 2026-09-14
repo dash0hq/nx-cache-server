@@ -184,10 +184,15 @@ From the repository root, with Helm on `PATH`:
 ```sh
 helm lint charts/nx-cache-server --strict \
   --set s3.bucket=test-cache,auth.readWriteSecret.name=test-auth
-uv run --with PyYAML python3 charts/nx-cache-server/tests/test_chart.py
+helm lint charts/nx-cache-server --strict \
+  -f charts/nx-cache-server/tests/optional-values.yaml
+helm template cache charts/nx-cache-server \
+  -f charts/nx-cache-server/tests/optional-values.yaml
 ```
 
-The test suite checks invalid values, exact environment strings and Secret
-references, hardened security, selectors, disk storage, existing ServiceAccounts,
-and optional tracing. `tests/optional-values.yaml` is a render
-fixture, not a deployable environment. It is excluded from packaged charts.
+`values.schema.json` validates values during linting, rendering and installation.
+An unconfigured `helm template cache charts/nx-cache-server` must fail with missing
+bucket and read-write Secret name diagnostics. Inspect the rendered resources when
+changing templates, including their Secret references, security settings and spool.
+`tests/optional-values.yaml` exercises optional configuration for local rendering;
+it is not a deployable environment and is excluded from packaged charts.
