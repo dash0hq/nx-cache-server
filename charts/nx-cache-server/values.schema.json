@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "nodeSelector", "auth", "s3", "serviceAccount", "podAnnotations", "terminationGracePeriodSeconds", "maxUploadBytes", "spool", "resources", "otlp"],
+  "properties": {
+    "replicaCount": {"type": "integer", "minimum": 1},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1, "pattern": "^[^\\s@]+$"},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "nodeSelector": {"$ref": "#/definitions/stringMap"},
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readWriteSecret", "readOnlySecret"],
+      "properties": {
+        "readWriteSecret": {
+          "allOf": [
+            {"$ref": "#/definitions/secretRef"},
+            {"properties": {"name": {"minLength": 1}}}
+          ]
+        },
+        "readOnlySecret": {"$ref": "#/definitions/secretRef"}
+      }
+    },
+    "s3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bucket", "region", "timeoutSeconds"],
+      "properties": {
+        "bucket": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
+        "region": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
+        "timeoutSeconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "roleArn"],
+      "properties": {
+        "name": {"$ref": "#/definitions/optionalName"},
+        "roleArn": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IAM role ARN, including optional IAM paths and AWS partitions.",
+          "pattern": "^arn:aws(-[a-z0-9]+)*:iam::[0-9]{12}:role/([!-~]+/)?[A-Za-z0-9_+=,.@-]{1,64}$"
+        }
+      }
+    },
+    "podAnnotations": {"$ref": "#/definitions/stringMap"},
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 1},
+    "maxUploadBytes": {"type": "integer", "minimum": 1, "maximum": 5368709120},
+    "spool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizeLimit"],
+      "properties": {
+        "sizeLimit": {"type": "string", "minLength": 1}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {"$ref": "#/definitions/quantities"},
+        "limits": {"$ref": "#/definitions/quantities"}
+      }
+    },
+    "otlp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "serviceName", "headersSecret"],
+      "properties": {
+        "endpoint": {"$ref": "#/definitions/endpoint"},
+        "serviceName": {"type": "string", "minLength": 1},
+        "headersSecret": {"$ref": "#/definitions/secretRef"}
+      },
+      "if": {"properties": {"headersSecret": {"properties": {"name": {"minLength": 1}}}}},
+      "then": {"properties": {"endpoint": {"minLength": 1}}}
+    }
+  },
+  "definitions": {
+    "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "optionalName": {"type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"},
+    "secretKey": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-zA-Z0-9._-]+$"},
+    "secretRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "key"],
+      "properties": {
+        "name": {"$ref": "#/definitions/optionalName"},
+        "key": {"$ref": "#/definitions/secretKey"}
+      }
+    },
+    "endpoint": {"type": "string", "pattern": "^$|^https?://[^/\\s]+[^\\s]*$"},
+    "quantities": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "string"},
+          {"type": "number", "minimum": 0}
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name | quote }}
+  labels:
+    {{- include "nx-cache-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nx-cache-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nx-cache-server.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nx-cache-server.serviceAccountName" . | quote }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nx-cache-server
+          image: {{ printf "%s@%s" .Values.image.repository .Values.image.digest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PORT
+              value: "3000"
+            - name: BIND_ADDRESS
+              value: "0.0.0.0"
+            - name: TMPDIR
+              value: /spool
+            - name: SERVICE_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "auth.readWriteSecret.name is required" .Values.auth.readWriteSecret.name | quote }}
+                  key: {{ .Values.auth.readWriteSecret.key | quote }}
+            {{- with .Values.auth.readOnlySecret }}
+            {{- if .name }}
+            - name: READ_ONLY_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
+            {{- end }}
+            - name: S3_BUCKET_NAME
+              value: {{ required "s3.bucket is required" .Values.s3.bucket | quote }}
+            - name: AWS_REGION
+              value: {{ required "s3.region is required" .Values.s3.region | quote }}
+            - name: S3_TIMEOUT
+              value: {{ .Values.s3.timeoutSeconds | int64 | toString | quote }}
+            - name: MAX_UPLOAD_BYTES
+              value: {{ .Values.maxUploadBytes | int64 | toString | quote }}
+            {{- if .Values.otlp.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otlp.endpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.otlp.serviceName | quote }}
+            {{- with .Values.otlp.headersSecret }}
+            {{- if .name }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: spool
+              mountPath: /spool
+      volumes:
+        - name: spool
+          emptyDir:
+            sizeLimit: {{ .Values.spool.sizeLimit | quote }}
