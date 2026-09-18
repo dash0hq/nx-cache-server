@@ -301,6 +301,73 @@ mod tests {
         assert_eq!(storage.entries.read().await["deadbeef"], artifact);
     }
 
+    /// Every 401 has the same shape: a plain-text body and the RFC 9110
+    /// challenge. Asserted in one place so the rejection cases cannot drift.
+    async fn assert_unauthorized_with_challenge(response: axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["content-type"], "text/plain");
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            "Unauthorized"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_token_is_refused_as_plain_text_with_a_challenge() {
+        let app = test_app(MemoryStorage::default());
+        let response = app
+            .oneshot(
+                Request::get("/v1/cache/deadbeef")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_unauthorized_with_challenge(response).await;
+    }
+
+    #[tokio::test]
+    async fn unknown_token_is_refused_as_plain_text_with_a_challenge() {
+        let app = test_app(MemoryStorage::default());
+        let response = app
+            .oneshot(
+                Request::get("/v1/cache/deadbeef")
+                    .header("authorization", "Bearer not-a-real-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_unauthorized_with_challenge(response).await;
+    }
+
+    /// A refused write is not an authentication failure, so it carries no
+    /// challenge — the caller's token is valid, it just may not write.
+    #[tokio::test]
+    async fn read_only_write_is_refused_as_plain_text_without_a_challenge() {
+        let app = test_app(MemoryStorage::default());
+        let response = app
+            .oneshot(
+                Request::put("/v1/cache/deadbeef")
+                    .header("authorization", "Bearer read-only-token")
+                    .body(Body::from("artifact"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["content-type"], "text/plain");
+        assert!(!response.headers().contains_key("www-authenticate"));
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            "Forbidden"
+        );
+    }
+
     #[tokio::test]
     async fn health_check_is_public() {
         let app = test_app(MemoryStorage::default());
